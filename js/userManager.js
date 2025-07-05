@@ -79,7 +79,7 @@ export class UserManager {
         if (this.users[userId]) {
             this.users[userId].x = x;
             this.users[userId].y = y;
-            
+
             if (userId === this.currentUser?.id) {
                 this.currentUser.x = x;
                 this.currentUser.y = y;
@@ -92,7 +92,7 @@ export class UserManager {
         if (this.users[userId]) {
             this.users[userId].status = status;
             this.users[userId].micOn = micOn;
-            
+
             if (userId === this.currentUser?.id) {
                 this.currentUser.status = status;
                 this.currentUser.micOn = micOn;
@@ -131,27 +131,48 @@ export class UserManager {
     // 全ユーザー更新
     updateAllUsers(newUsers) {
         const previousUsers = { ...this.users };
-        
-        // 新規ユーザーの検出
+
+        // データの検証と正規化
+        const validatedUsers = {};
         Object.keys(newUsers).forEach(userId => {
+            const user = newUsers[userId];
+            if (user && typeof user === 'object') {
+                // 必須フィールドの検証とデフォルト値設定
+                validatedUsers[userId] = {
+                    id: userId,
+                    nickname: user.nickname || 'Unknown User',
+                    x: user.x || 500,
+                    y: user.y || 300,
+                    status: user.status || 'available',
+                    micOn: user.micOn !== undefined ? user.micOn : true,
+                    color: user.color || this.getRandomColor(),
+                    joinedAt: user.joinedAt || Date.now(),
+                    audioLevel: user.audioLevel || 0,
+                    isSpeaking: user.isSpeaking || false
+                };
+            }
+        });
+
+        // 新規ユーザーの検出
+        Object.keys(validatedUsers).forEach(userId => {
             if (!previousUsers[userId] && userId !== this.currentUser?.id) {
                 if (this.onUserJoin) {
-                    this.onUserJoin(newUsers[userId]);
+                    this.onUserJoin(validatedUsers[userId]);
                 }
             }
         });
-        
+
         // 退出ユーザーの検出
         Object.keys(previousUsers).forEach(userId => {
-            if (!newUsers[userId] && userId !== this.currentUser?.id) {
+            if (!validatedUsers[userId] && userId !== this.currentUser?.id) {
                 if (this.onUserLeave) {
                     this.onUserLeave(previousUsers[userId]);
                 }
             }
         });
-        
-        this.users = newUsers;
-        
+
+        this.users = validatedUsers;
+
         if (this.onUserUpdate) {
             this.onUserUpdate(this.users);
         }
@@ -236,4 +257,4 @@ export class UserManager {
         this.users = {};
         this.currentStatus = 'available';
     }
-} 
+}

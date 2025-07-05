@@ -73,11 +73,11 @@ export class UIManager {
         this.elements.micSensitivity.addEventListener('input', (e) => {
             this.onMicSensitivityChange?.(e.target.value / 100);
         });
-        
+
         this.elements.masterVolume.addEventListener('input', (e) => {
             this.onMasterVolumeChange?.(e.target.value / 100);
         });
-        
+
         this.elements.voiceRangeSlider.addEventListener('input', (e) => {
             this.onVoiceRangeChange?.(parseInt(e.target.value));
         });
@@ -156,7 +156,7 @@ export class UIManager {
 
     // 変形更新
     updateTransform() {
-        this.elements.officeFloor.style.transform = 
+        this.elements.officeFloor.style.transform =
             `translate(calc(-50% + ${this.panX}px), calc(-50% + ${this.panY}px)) scale(${this.currentZoom})`;
     }
 
@@ -170,10 +170,10 @@ export class UIManager {
     // 音声範囲表示更新
     updateVoiceRangeDisplay(currentUser, voiceRangeDistance) {
         if (!currentUser) return;
-        
+
         const range = this.elements.voiceRange;
         const diameter = voiceRangeDistance * 2;
-        
+
         range.style.width = diameter + 'px';
         range.style.height = diameter + 'px';
         range.style.left = (currentUser.x - voiceRangeDistance + 25) + 'px';
@@ -238,7 +238,7 @@ export class UIManager {
             circle.classList.add('speaking');
         }
         circle.style.background = user.color;
-        circle.textContent = user.nickname.charAt(0).toUpperCase();
+        circle.textContent = (user.nickname || 'U').charAt(0).toUpperCase();
 
         const statusIndicator = document.createElement('div');
         statusIndicator.className = `status-indicator status-${user.status}`;
@@ -254,7 +254,7 @@ export class UIManager {
 
         const name = document.createElement('div');
         name.className = 'avatar-name';
-        name.textContent = user.nickname;
+        name.textContent = user.nickname || 'Unknown User';
 
         circle.appendChild(statusIndicator);
         circle.appendChild(micIndicator);
@@ -293,7 +293,7 @@ export class UIManager {
             const avatar = document.createElement('div');
             avatar.className = 'participant-avatar';
             avatar.style.background = user.color;
-            avatar.textContent = user.nickname.charAt(0).toUpperCase();
+            avatar.textContent = (user.nickname || 'U').charAt(0).toUpperCase();
 
             const statusIndicator = document.createElement('div');
             statusIndicator.className = `status-indicator status-${user.status}`;
@@ -314,7 +314,7 @@ export class UIManager {
 
             const name = document.createElement('p');
             name.className = 'participant-name';
-            name.textContent = user.nickname;
+            name.textContent = user.nickname || 'Unknown User';
 
             const status = document.createElement('p');
             status.className = 'participant-status';
@@ -398,9 +398,9 @@ export class UIManager {
 
     // ヘッダー情報設定
     updateHeaderInfo(user) {
-        this.elements.userAvatarHeader.textContent = user.nickname.charAt(0).toUpperCase();
+        this.elements.userAvatarHeader.textContent = (user.nickname || 'U').charAt(0).toUpperCase();
         this.elements.userAvatarHeader.style.background = user.color;
-        this.elements.userNameHeader.textContent = user.nickname;
+        this.elements.userNameHeader.textContent = user.nickname || 'Unknown User';
     }
 
     // 保存された名前の復元
@@ -442,4 +442,4 @@ export class UIManager {
         this.elements.nicknameInput.value = nickname;
         this.updateCharCount();
     }
-} 
+}
