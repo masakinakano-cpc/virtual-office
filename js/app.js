@@ -11,7 +11,7 @@ export class VirtualOfficeApp {
         this.userManager = new UserManager();
         this.uiManager = new UIManager();
         this.realtimeManager = null;
-        
+
         this.isInitialized = false;
         this.isFirebaseEnabled = false;
     }
@@ -22,31 +22,34 @@ export class VirtualOfficeApp {
             // Firebase初期化
             const { database, isFirebaseEnabled } = initializeFirebase();
             this.isFirebaseEnabled = isFirebaseEnabled;
-            
+
             // リアルタイム通信管理初期化
             this.realtimeManager = new RealtimeManager(database, isFirebaseEnabled);
-            
+
             // UI初期化
             this.uiManager.initializeElements();
             this.setupUICallbacks();
             this.uiManager.setupEventListeners();
-            
+
             // 保存された名前の復元
             this.uiManager.restoreSavedName();
-            
+
             // 名前保存の設定
             this.uiManager.elements.nicknameInput.addEventListener('input', () => {
                 this.uiManager.saveName();
             });
-            
+
+            // ブラウザ終了時の自動退出設定
+            this.setupBeforeUnloadHandler();
+
             // デモモード表示
             if (!this.isFirebaseEnabled) {
                 this.uiManager.showDemoMode();
             }
-            
+
             this.isInitialized = true;
             console.log('バーチャルオフィスアプリケーション初期化完了');
-            
+
         } catch (error) {
             console.error('アプリケーション初期化エラー:', error);
         }
@@ -56,50 +59,50 @@ export class VirtualOfficeApp {
     setupUICallbacks() {
         // 参加ボタン
         this.uiManager.elements.joinBtn.addEventListener('click', () => this.joinOffice());
-        
+
         // コントロールボタン
         this.uiManager.elements.statusBtn.addEventListener('click', () => this.toggleStatus());
         this.uiManager.elements.micBtn.addEventListener('click', () => this.toggleMic());
         this.uiManager.elements.volumeBtn.addEventListener('click', () => this.toggleAudioSettings());
         this.uiManager.elements.leaveBtn.addEventListener('click', () => this.leaveOffice());
-        
+
         // 位置移動
         this.uiManager.onMoveToPosition = (x, y) => this.moveToPosition(x, y);
-        
+
         // 音声設定
         this.uiManager.onMicSensitivityChange = (sensitivity) => {
             this.audioManager.setMicSensitivity(sensitivity);
         };
-        
+
         this.uiManager.onMasterVolumeChange = (volume) => {
             this.audioManager.setMasterVolume(volume);
         };
-        
+
         this.uiManager.onVoiceRangeChange = (distance) => {
             this.audioManager.setVoiceRange(distance);
             this.uiManager.updateVoiceRangeDisplay(this.userManager.getCurrentUser(), distance);
         };
-        
+
         // 音声レベル変更コールバック
         this.audioManager.onAudioLevelChange = (level, isSpeaking) => {
             this.uiManager.updateAudioLevelDisplay(level);
             this.uiManager.updateSpeakingState(isSpeaking, this.audioManager.isMicOn);
-            
+
             // 自分の音声レベルをデータベースに送信
             if (this.userManager.getCurrentUser() && this.isFirebaseEnabled) {
                 this.realtimeManager.updateAudioLevel(this.userManager.getCurrentUser().id, level, isSpeaking);
             }
         };
-        
+
         // ユーザー更新コールバック
         this.userManager.onUserUpdate = (users) => {
             this.uiManager.updateUserDisplay(users, this.userManager.getCurrentUser()?.id);
         };
-        
+
         this.userManager.onUserJoin = (user) => {
             this.uiManager.showNotification(`🎉 ${user.nickname}が参加しました`);
         };
-        
+
         this.userManager.onUserLeave = (user) => {
             this.uiManager.showNotification(`👋 ${user.nickname}が退出しました`);
         };
@@ -126,7 +129,7 @@ export class VirtualOfficeApp {
 
             // ユーザー作成
             const user = this.userManager.createUser(nickname);
-            
+
             // Firebaseまたはローカルストレージに保存
             if (this.isFirebaseEnabled) {
                 await this.realtimeManager.saveUserToFirebase(user);
@@ -181,7 +184,7 @@ export class VirtualOfficeApp {
     toggleStatus() {
         const newStatus = this.userManager.toggleStatus();
         this.uiManager.updateStatus(newStatus);
-        
+
         const currentUser = this.userManager.getCurrentUser();
         if (currentUser && this.isFirebaseEnabled) {
             this.realtimeManager.updateUserStatus(currentUser.id, newStatus, currentUser.micOn);
@@ -192,11 +195,11 @@ export class VirtualOfficeApp {
     toggleMic() {
         const isMicOn = this.audioManager.toggleMic();
         this.uiManager.updateMicState(isMicOn);
-        
+
         const currentUser = this.userManager.getCurrentUser();
         if (currentUser) {
             this.userManager.updateUserStatus(currentUser.id, currentUser.status, isMicOn);
-            
+
             if (this.isFirebaseEnabled) {
                 this.realtimeManager.updateUserStatus(currentUser.id, currentUser.status, isMicOn);
             }
@@ -215,26 +218,124 @@ export class VirtualOfficeApp {
     async leaveOffice() {
         if (confirm('オフィスから退出しますか？')) {
             const currentUser = this.userManager.getCurrentUser();
-            
+
             // 音声デバイスのクリーンアップ
             this.audioManager.cleanup();
-            
+
             // リアルタイム更新停止
             this.realtimeManager.stopRealtimeUpdates();
-            
+
             // Firebaseからユーザー削除
             if (this.isFirebaseEnabled && currentUser) {
                 await this.realtimeManager.removeUserFromFirebase(currentUser.id);
             }
-            
+
             // 状態クリーンアップ
             this.userManager.cleanup();
-            
+
             // UI更新
             this.uiManager.hideOffice();
             this.uiManager.showEntry();
-            
+
             this.uiManager.showNotification('👋 オフィスから退出しました');
+        }
+    }
+
+    // ブラウザ終了時の自動退出設定
+    setupBeforeUnloadHandler() {
+        // beforeunloadイベント（ページを離れる時）- 同期的に処理
+        window.addEventListener('beforeunload', (event) => {
+            if (this.userManager.getCurrentUser()) {
+                console.log('ブラウザ終了を検出: 同期的な退出処理を実行');
+                this.syncForceLeaveOffice();
+            }
+        });
+
+        // pagehideイベント（ページが非表示になる時）
+        window.addEventListener('pagehide', async (event) => {
+            if (this.userManager.getCurrentUser()) {
+                console.log('ページ非表示を検出: 自動退出処理を実行');
+                await this.forceLeaveOffice();
+            }
+        });
+
+        // visibilitychangeイベント（タブの切り替え時）
+        document.addEventListener('visibilitychange', async () => {
+            if (document.visibilityState === 'hidden' && this.userManager.getCurrentUser()) {
+                console.log('タブ非表示を検出: 自動退出処理を実行');
+                await this.forceLeaveOffice();
+            }
+        });
+
+        // unloadイベント（ページアンロード時）
+        window.addEventListener('unload', async (event) => {
+            if (this.userManager.getCurrentUser()) {
+                console.log('ページアンロードを検出: 自動退出処理を実行');
+                await this.forceLeaveOffice();
+            }
+        });
+    }
+
+    // 同期的な強制退出処理（beforeunload用）
+    syncForceLeaveOffice() {
+        try {
+            const currentUser = this.userManager.getCurrentUser();
+            if (!currentUser) return;
+
+            console.log('同期的な自動退出処理を開始:', currentUser.nickname);
+
+            // 音声デバイスのクリーンアップ
+            this.audioManager.cleanup();
+
+            // リアルタイム更新停止
+            this.realtimeManager.stopRealtimeUpdates();
+
+            // Firebaseからユーザー削除（同期的に）
+            if (this.isFirebaseEnabled) {
+                // 同期的な削除のため、XMLHttpRequestを使用
+                const xhr = new XMLHttpRequest();
+                xhr.open('DELETE', `https://virtual-office-team-default-rtdb.asia-southeast1.firebasedatabase.app/users/${currentUser.id}.json`, false);
+                xhr.send();
+                console.log('Firebaseからユーザーを同期的に削除しました:', currentUser.id);
+            }
+
+            // 状態クリーンアップ
+            this.userManager.cleanup();
+
+            console.log('同期的な自動退出処理が完了しました');
+
+        } catch (error) {
+            console.error('同期的な自動退出処理エラー:', error);
+        }
+    }
+
+    // 強制退出処理（確認なし）
+    async forceLeaveOffice() {
+        try {
+            const currentUser = this.userManager.getCurrentUser();
+            if (!currentUser) return;
+
+            console.log('自動退出処理を開始:', currentUser.nickname);
+
+            // 音声デバイスのクリーンアップ
+            this.audioManager.cleanup();
+
+            // リアルタイム更新停止
+            this.realtimeManager.stopRealtimeUpdates();
+
+            // Firebaseからユーザー削除
+            if (this.isFirebaseEnabled) {
+                await this.realtimeManager.removeUserFromFirebase(currentUser.id);
+                console.log('Firebaseからユーザーを削除しました:', currentUser.id);
+            }
+
+            // 状態クリーンアップ
+            this.userManager.cleanup();
+
+            console.log('自動退出処理が完了しました');
+
+        } catch (error) {
+            console.error('自動退出処理エラー:', error);
         }
     }
 
@@ -244,4 +345,4 @@ export class VirtualOfficeApp {
         await app.initialize();
         return app;
     }
-} 
+}
