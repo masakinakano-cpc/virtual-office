@@ -1,142 +1,16 @@
 <!DOCTYPE html>
 <html lang="ja">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>バーチャルオフィス - 音声通話対応</title>
-    <link rel="stylesheet" href="css/styles.css">
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>バーチャルオフィス - URI Avatar Position</title>
 </head>
+
 <body>
-    <!-- ローディング画面 -->
-    <div class="loading-screen" id="loadingScreen">
-        <div class="loading-content">
-            <div class="spinner"></div>
-            <p>音声デバイスを準備中...</p>
-        </div>
-    </div>
-
-    <!-- 入室画面 -->
-    <div class="entry-screen" id="entryScreen">
-        <div class="entry-card">
-            <h1>🎤 Virtual Office</h1>
-            <p>音声通話対応バーチャルオフィス</p>
-            <div class="mic-permission">
-                🎤 マイクへのアクセス許可が必要です。ブラウザの許可ボタンをクリックしてください。
-            </div>
-            <input type="text" class="nickname-input" id="nicknameInput" placeholder="あなたの名前を入力" maxlength="10">
-            <div class="char-count">
-                <span id="charCount">0</span>/10文字
-            </div>
-            <button class="join-btn" id="joinBtn" disabled>オフィスに参加</button>
-        </div>
-    </div>
-
-    <!-- メインオフィス空間 -->
-    <div class="office-container" id="officeContainer">
-        <!-- トップバー -->
-        <div class="top-bar">
-            <div class="user-info">
-                <div class="user-avatar-header" id="userAvatarHeader">
-                    <div class="mic-indicator" id="micIndicator"></div>
-                    <div class="audio-level">
-                        <div class="audio-level-fill" id="audioLevelFill"></div>
-                    </div>
-                </div>
-                <div class="user-details">
-                    <h3 id="userNameHeader"></h3>
-                    <p>音声通話対応</p>
-                </div>
-            </div>
-            <div class="controls">
-                <button class="control-btn status-btn" id="statusBtn">🟢 在席</button>
-                <button class="control-btn mic-btn" id="micBtn">🎤 マイクON</button>
-                <button class="control-btn volume-btn" id="volumeBtn">🔊 音量</button>
-                <button class="control-btn leave-btn" id="leaveBtn">退出</button>
-            </div>
-        </div>
-
-        <!-- 音声設定パネル -->
-        <div class="audio-settings" id="audioSettings">
-            <div class="panel-header">🎧 音声設定</div>
-            <div class="audio-setting-item">
-                <label class="audio-setting-label">マイク感度</label>
-                <input type="range" class="audio-slider" id="micSensitivity" min="0" max="100" value="50">
-            </div>
-            <div class="audio-setting-item">
-                <label class="audio-setting-label">マスターボリューム</label>
-                <input type="range" class="audio-slider" id="masterVolume" min="0" max="100" value="50">
-            </div>
-            <div class="audio-setting-item">
-                <label class="audio-setting-label">通話範囲 (メートル)</label>
-                <input type="range" class="audio-slider" id="voiceRange" min="50" max="300" value="150">
-            </div>
-        </div>
-
-        <!-- オフィス空間 -->
-        <div class="office-space" id="officeSpace">
-            <div class="office-floor" id="officeFloor">
-                <!-- デスクエリア -->
-                <div class="desk" style="top: 100px; left: 100px; width: 80px; height: 60px;">Desk 1</div>
-                <div class="desk" style="top: 100px; left: 200px; width: 80px; height: 60px;">Desk 2</div>
-                <div class="desk" style="top: 100px; left: 300px; width: 80px; height: 60px;">Desk 3</div>
-                <div class="desk" style="top: 200px; left: 100px; width: 80px; height: 60px;">Desk 4</div>
-                <div class="desk" style="top: 200px; left: 200px; width: 80px; height: 60px;">Desk 5</div>
-                <div class="desk" style="top: 200px; left: 300px; width: 80px; height: 60px;">Desk 6</div>
-
-                <!-- 会議室 -->
-                <div class="meeting-room" style="top: 100px; right: 100px; width: 200px; height: 150px;">
-                    📋 Meeting Room A
-                </div>
-                <div class="meeting-room" style="top: 300px; right: 100px; width: 200px; height: 150px;">
-                    💼 Meeting Room B
-                </div>
-
-                <!-- ラウンジエリア -->
-                <div class="lounge" style="bottom: 100px; left: 100px; width: 300px; height: 120px;">
-                    ☕ Coffee Lounge
-                </div>
-
-                <!-- 音声範囲表示 -->
-                <div class="voice-range" id="voiceRange"></div>
-            </div>
-        </div>
-
-        <!-- 参加者パネル -->
-        <div class="participants-panel">
-            <div class="panel-header">
-                🎤 参加者 (<span id="participantCount">0</span>人)
-            </div>
-            <div id="participantsList"></div>
-        </div>
-
-        <!-- ズーム・パンコントロール -->
-        <div class="zoom-controls">
-            <button class="zoom-btn" id="zoomInBtn">+</button>
-            <button class="zoom-btn" id="zoomOutBtn">-</button>
-            <button class="zoom-btn" id="resetViewBtn">⌂</button>
-        </div>
-    </div>
-
-    <!-- 隠れた音声要素 -->
-    <div id="audioElements"></div>
-
-    <!-- Firebase SDK -->
-    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
-
-    <!-- アプリケーションスクリプト -->
-    <script type="module">
-        import { VirtualOfficeApp } from './js/app.js';
-
-        // アプリケーション開始
-        document.addEventListener('DOMContentLoaded', async () => {
-            try {
-                const app = await VirtualOfficeApp.start();
-                console.log('バーチャルオフィスアプリケーションが開始されました');
-            } catch (error) {
-                console.error('アプリケーション開始エラー:', error);
-            }
-        });
-    </script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
 </body>
+
 </html>
