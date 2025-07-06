@@ -629,7 +629,6 @@ export const useI18n = (config?: Partial<I18nConfig>) => {
         getDateFormatter,
         getNumberFormatter,
         detectBrowserLocale,
-        initializeLocale,
         getLocaleDisplayName
     }
 }
