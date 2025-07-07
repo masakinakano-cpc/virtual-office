@@ -74,15 +74,6 @@
             <span class="ml-2 text-sm text-gray-700">Has Settings Access</span>
           </label>
 
-          <label class="flex items-center">
-            <input
-              v-model="hasBilling"
-              type="checkbox"
-              class="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-            >
-            <span class="ml-2 text-sm text-gray-700">Has Billing Access</span>
-          </label>
-
           <button
             @click="toggleSidebar"
             class="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -155,7 +146,7 @@
               <svg class="w-4 h-4 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
               </svg>
-              Settings and billing management
+              Settings and management
             </li>
             <li class="flex items-center">
               <svg class="w-4 h-4 text-green-500 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -205,7 +196,6 @@ const userRole = ref<'admin' | 'member' | 'guest'>('admin')
 const userStatus = ref<'online' | 'away' | 'busy'>('online')
 const showOrganization = ref(true)
 const hasSettings = ref(true)
-const hasBilling = ref(true)
 const eventLog = ref<Array<{ timestamp: string; message: string }>>([])
 
 // Mock data
@@ -213,8 +203,7 @@ const mockOrganization = ref({
   id: 'org-1',
   name: 'Acme Corporation',
   description: 'Enterprise organization',
-  type: 'private',
-  enabledBillingMethods: ['user_billing', 'space_billing']
+  type: 'private'
 })
 
 const mockWorkspace = ref({
@@ -223,7 +212,6 @@ const mockWorkspace = ref({
   description: 'Primary workspace for team collaboration',
   type: 'private',
   domain: 'acme-office.ovice.in',
-  enabledBillingMethods: ['space_billing', 'user_billing'],
   valid_until: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
 })
 

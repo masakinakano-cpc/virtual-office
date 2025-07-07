@@ -129,11 +129,10 @@ const hasOrganizationFeatures = computed(() => {
 
   // Check if user has access to organization features
   const hasOrgSettings = props.user?.permissions?.includes('organization_settings')
-  const hasBilling = props.workspace?.enabledBillingMethods?.includes('user_billing')
   const hasAnalytics = props.user?.permissions?.includes('analytics')
   const hasMeetingLogs = props.user?.permissions?.includes('meeting_logs')
 
-  return hasOrgSettings || hasBilling || hasAnalytics || hasMeetingLogs
+  return hasOrgSettings || hasAnalytics || hasMeetingLogs
 })
 
 const defaultSidebarItems = computed(() => {
