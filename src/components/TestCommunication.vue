@@ -144,9 +144,10 @@ onMounted(() => {
     id: userId.value,
     nickname: nickname.value,
     color: '#3B82F6',
-    position: { x: 100, y: 100 },
+    position: { x: 200, y: 200 },
     isActive: true,
     isSpeaking: false,
+    isVideoEnabled: false,
     joinedAt: new Date()
   })
 })

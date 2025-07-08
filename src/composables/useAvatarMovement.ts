@@ -15,6 +15,12 @@ export interface Avatar {
     lastUpdate: Date
 }
 
+export interface MovementTarget {
+    x: number
+    y: number
+    showArrow: boolean
+}
+
 export function useAvatarMovement(
     containerId: string,
     onPositionUpdate?: (position: AvatarPosition) => void
@@ -24,6 +30,8 @@ export function useAvatarMovement(
     const direction = ref(0)
     const moveSpeed = 150 // ピクセル/秒
     const container = ref<HTMLElement | null>(null)
+    const movementTarget = ref<MovementTarget | null>(null)
+    const isAutoMoving = ref(false)
 
     // キーボード入力の状態
     const keys = ref({
@@ -40,6 +48,7 @@ export function useAvatarMovement(
     // 移動アニメーション
     let animationFrame: number | null = null
     let lastTime = 0
+    let clickTimeout: NodeJS.Timeout | null = null
 
     // コンテナの境界を取得
     const getContainerBounds = () => {
@@ -73,7 +82,7 @@ export function useAvatarMovement(
         }
 
         // 移動状態の更新
-        isMoving.value = deltaX !== 0 || deltaY !== 0
+        isMoving.value = deltaX !== 0 || deltaY !== 0 || isAutoMoving.value
 
         // 方向の計算
         if (isMoving.value) {
@@ -140,6 +149,11 @@ export function useAvatarMovement(
         if (key in keys.value) {
             keys.value[key] = true
             event.preventDefault()
+
+            // キーボード操作時は自動移動を停止
+            if (isAutoMoving.value) {
+                stopAutoMovement()
+            }
         }
     }
 
@@ -151,7 +165,7 @@ export function useAvatarMovement(
         }
     }
 
-    // マウス/タッチでの移動
+    // シングルクリックでの移動（矢印表示）
     const handleClick = (event: MouseEvent) => {
         if (!container.value) return
 
@@ -159,7 +173,53 @@ export function useAvatarMovement(
         const targetX = event.clientX - rect.left
         const targetY = event.clientY - rect.top
 
+        // 矢印を表示
+        showMovementArrow({ x: targetX, y: targetY })
+    }
+
+    // ダブルクリックでの移動
+    const handleDoubleClick = (event: MouseEvent) => {
+        if (!container.value) return
+
+        const rect = container.value.getBoundingClientRect()
+        const targetX = event.clientX - rect.left
+        const targetY = event.clientY - rect.top
+
+        // 矢印を非表示にして移動開始
+        hideMovementArrow()
         moveToPosition({ x: targetX, y: targetY })
+    }
+
+    // 移動矢印の表示
+    const showMovementArrow = (target: AvatarPosition) => {
+        movementTarget.value = {
+            x: target.x,
+            y: target.y,
+            showArrow: true
+        }
+
+        // 3秒後に矢印を自動で非表示
+        if (clickTimeout) {
+            clearTimeout(clickTimeout)
+        }
+        clickTimeout = setTimeout(() => {
+            hideMovementArrow()
+        }, 3000)
+    }
+
+    // 移動矢印の非表示
+    const hideMovementArrow = () => {
+        movementTarget.value = null
+        if (clickTimeout) {
+            clearTimeout(clickTimeout)
+            clickTimeout = null
+        }
+    }
+
+    // 自動移動の停止
+    const stopAutoMovement = () => {
+        isAutoMoving.value = false
+        hideMovementArrow()
     }
 
     // 指定位置への移動
@@ -171,6 +231,7 @@ export function useAvatarMovement(
 
         if (distance < 10) return // 移動距離が小さい場合は無視
 
+        isAutoMoving.value = true
         const duration = distance / moveSpeed // 移動時間を計算
         const startTime = performance.now()
 
@@ -197,6 +258,8 @@ export function useAvatarMovement(
 
             if (progress < 1) {
                 requestAnimationFrame(animateMove)
+            } else {
+                isAutoMoving.value = false
             }
         }
 
@@ -207,8 +270,8 @@ export function useAvatarMovement(
     const handleTouchStart = (event: TouchEvent) => {
         if (!container.value || event.touches.length !== 1) return
 
-        const rect = container.value.getBoundingClientRect()
         const touch = event.touches[0]
+        const rect = container.value.getBoundingClientRect()
         const targetX = touch.clientX - rect.left
         const targetY = touch.clientY - rect.top
 
@@ -221,30 +284,31 @@ export function useAvatarMovement(
         avatarPosition.value = position
     }
 
-    // 他のアバターとの衝突検出
+    // 衝突検出
     const checkCollision = (otherAvatars: Avatar[], avatarSize = 60) => {
-        const currentPos = avatarPosition.value
-
-        return otherAvatars.some(other => {
+        return otherAvatars.some(avatar => {
             const distance = Math.sqrt(
-                Math.pow(other.position.x - currentPos.x, 2) +
-                Math.pow(other.position.y - currentPos.y, 2)
+                Math.pow(avatar.position.x - avatarPosition.value.x, 2) +
+                Math.pow(avatar.position.y - avatarPosition.value.y, 2)
             )
             return distance < avatarSize
         })
     }
 
-    // 近接アバターの検出
+    // 近くのアバターを取得
     const getNearbyAvatars = (otherAvatars: Avatar[], radius = 100) => {
-        const currentPos = avatarPosition.value
-
-        return otherAvatars.filter(other => {
+        return otherAvatars.filter(avatar => {
             const distance = Math.sqrt(
-                Math.pow(other.position.x - currentPos.x, 2) +
-                Math.pow(other.position.y - currentPos.y, 2)
+                Math.pow(avatar.position.x - avatarPosition.value.x, 2) +
+                Math.pow(avatar.position.y - avatarPosition.value.y, 2)
             )
             return distance <= radius
         })
+    }
+
+    // 通話範囲内のアバターを取得
+    const getAvatarsInCallRange = (otherAvatars: Avatar[], callRadius = 150) => {
+        return getNearbyAvatars(otherAvatars, callRadius)
     }
 
     // 初期化
@@ -253,44 +317,54 @@ export function useAvatarMovement(
 
         if (container.value) {
             // イベントリスナーの追加
-            document.addEventListener('keydown', handleKeyDown)
-            document.addEventListener('keyup', handleKeyUp)
             container.value.addEventListener('click', handleClick)
+            container.value.addEventListener('dblclick', handleDoubleClick)
             container.value.addEventListener('touchstart', handleTouchStart)
 
-            // アニメーションの開始
-            animationFrame = requestAnimationFrame(animate)
+            // ダブルクリックでのテキスト選択を防ぐ
+            container.value.style.userSelect = 'none'
+            container.value.style.webkitUserSelect = 'none'
         }
+
+        // キーボードイベントリスナー
+        document.addEventListener('keydown', handleKeyDown)
+        document.addEventListener('keyup', handleKeyUp)
+
+        // アニメーション開始
+        animationFrame = requestAnimationFrame(animate)
     })
 
     // クリーンアップ
     onUnmounted(() => {
-        document.removeEventListener('keydown', handleKeyDown)
-        document.removeEventListener('keyup', handleKeyUp)
-
         if (container.value) {
             container.value.removeEventListener('click', handleClick)
+            container.value.removeEventListener('dblclick', handleDoubleClick)
             container.value.removeEventListener('touchstart', handleTouchStart)
         }
+
+        document.removeEventListener('keydown', handleKeyDown)
+        document.removeEventListener('keyup', handleKeyUp)
 
         if (animationFrame) {
             cancelAnimationFrame(animationFrame)
         }
+
+        if (clickTimeout) {
+            clearTimeout(clickTimeout)
+        }
     })
 
     return {
-        // 状態
         avatarPosition,
         isMoving,
         direction,
-
-        // メソッド
+        movementTarget,
+        isAutoMoving,
         moveToPosition,
         setInitialPosition,
         checkCollision,
         getNearbyAvatars,
-
-        // ユーティリティ
-        getContainerBounds
+        getAvatarsInCallRange,
+        stopAutoMovement
     }
 }

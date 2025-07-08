@@ -227,10 +227,9 @@ export function useSpatialAudio() {
         const audioBuffer = context.createBuffer(1, frameCount, sampleRate)
         const channelData = audioBuffer.getChannelData(0)
 
-        // 簡単な正弦波を生成
-        const frequency = 440 // A4
+        // 非常に静かなホワイトノイズを生成（時報音を避ける）
         for (let i = 0; i < frameCount; i++) {
-            channelData[i] = Math.sin(2 * Math.PI * frequency * i / sampleRate) * 0.1
+            channelData[i] = (Math.random() - 0.5) * 0.02 // 非常に小さい音量
         }
 
         return audioBuffer
@@ -240,10 +239,8 @@ export function useSpatialAudio() {
     const addAmbientSound = (id: string, position: Position) => {
         addAudioSource(id, position, 0.3)
 
-        // 環境音を再生
-        playAudio(id)
-
-        console.log(`環境音 ${id} を追加しました`)
+        // 環境音は自動再生しない（手動で有効にする必要がある）
+        console.log(`環境音 ${id} を追加しました（再生は手動で有効にしてください）`)
     }
 
     // 通知音の再生

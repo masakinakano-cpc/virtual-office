@@ -1,4 +1,4 @@
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useSignalingClient } from './useSignalingClient'
 
 export interface CallUser {
@@ -6,6 +6,18 @@ export interface CallUser {
     nickname: string
     stream?: MediaStream
     peerConnection?: RTCPeerConnection
+    isAudioEnabled: boolean
+    isVideoEnabled: boolean
+    distance?: number
+    isInCallRange: boolean
+    retryCount?: number
+}
+
+export interface ProximityCallOptions {
+    audioEnabled: boolean
+    videoEnabled: boolean
+    callRadius: number
+    autoConnect: boolean
 }
 
 export interface CallState {
@@ -17,16 +29,36 @@ export interface CallState {
     remoteUsers: Map<string, CallUser>
 }
 
-export function useWebRTCCall(roomId: string, userId: string, nickname: string) {
-    // 状態管理
-    const isCallActive = ref(false)
-    const isMicrophoneOn = ref(false)
-    const isCameraOn = ref(false)
-    const isScreenSharing = ref(false)
+export function useWebRTCCall(
+    roomId: string,
+    userId: string,
+    nickname: string,
+    options: ProximityCallOptions = {
+        audioEnabled: true,
+        videoEnabled: false,
+        callRadius: 150,
+        autoConnect: true
+    }
+) {
+    // リアクティブな状態
     const localStream = ref<MediaStream | null>(null)
-    const screenStream = ref<MediaStream | null>(null)
-    const remoteUsers = ref<Map<string, CallUser>>(new Map())
-    const callError = ref<string | null>(null)
+    const remoteUsers = reactive(new Map<string, CallUser>())
+    const isCallActive = ref(false)
+    const isMicrophoneOn = ref(options.audioEnabled)
+    const isCameraOn = ref(options.videoEnabled)
+    const isScreenSharing = ref(false)
+    const callRadius = ref(options.callRadius)
+    const autoConnect = ref(options.autoConnect)
+
+    // 現在通話中のユーザー
+    const activeCallUsers = ref<string[]>([])
+
+    // エラー状態
+    const connectionError = ref<string | null>(null)
+    const isConnecting = ref(false)
+
+    // シグナリングクライアント
+    const signaling = useSignalingClient(roomId, userId, nickname)
 
     // WebRTC設定
     const rtcConfiguration: RTCConfiguration = {
@@ -36,66 +68,392 @@ export function useWebRTCCall(roomId: string, userId: string, nickname: string) 
         ]
     }
 
-    // ピア接続のマップ
-    const peerConnections = new Map<string, RTCPeerConnection>()
+    // メディアストリーム制約
+    const getMediaConstraints = (includeVideo = false) => ({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000,
+            channelCount: 1
+        },
+        video: includeVideo ? {
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+            frameRate: { ideal: 30 }
+        } : false
+    })
 
-    // シグナリングクライアント
-    const signalingClient = useSignalingClient(roomId, userId, nickname)
-
-    // ローカルメディアの取得
-    const getLocalMedia = async (constraints: MediaStreamConstraints = { video: true, audio: true }) => {
+    // ローカルストリームの取得
+    const getLocalStream = async (includeVideo = false) => {
         try {
+            const constraints = getMediaConstraints(includeVideo)
             const stream = await navigator.mediaDevices.getUserMedia(constraints)
-            localStream.value = stream
 
-            // 音声トラックの状態を更新
-            const audioTracks = stream.getAudioTracks()
-            if (audioTracks.length > 0) {
-                isMicrophoneOn.value = audioTracks[0].enabled
+            // 音声トラックの設定
+            const audioTrack = stream.getAudioTracks()[0]
+            if (audioTrack) {
+                audioTrack.enabled = isMicrophoneOn.value
             }
 
-            // ビデオトラックの状態を更新
-            const videoTracks = stream.getVideoTracks()
-            if (videoTracks.length > 0) {
-                isCameraOn.value = videoTracks[0].enabled
+            // ビデオトラックの設定
+            const videoTrack = stream.getVideoTracks()[0]
+            if (videoTrack) {
+                videoTrack.enabled = isCameraOn.value
             }
 
             return stream
         } catch (error) {
-            console.error('Failed to get local media:', error)
-            callError.value = 'カメラまたはマイクへのアクセスに失敗しました'
+            console.error('メディアストリームの取得に失敗:', error)
+            connectionError.value = 'カメラ・マイクへのアクセスに失敗しました'
             throw error
         }
     }
 
+    // ピア接続の作成
+    const createPeerConnection = (targetUserId: string): RTCPeerConnection => {
+        const peerConnection = new RTCPeerConnection(rtcConfiguration)
+
+        // ICE候補の処理
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                signaling.sendMessage({
+                    type: 'ice-candidate',
+                    candidate: event.candidate,
+                    targetUserId
+                })
+            }
+        }
+
+        // リモートストリームの受信
+        peerConnection.ontrack = (event) => {
+            const [remoteStream] = event.streams
+            const user = remoteUsers.get(targetUserId)
+            if (user) {
+                user.stream = remoteStream
+
+                // 音声・ビデオの状態を更新
+                const audioTrack = remoteStream.getAudioTracks()[0]
+                const videoTrack = remoteStream.getVideoTracks()[0]
+
+                user.isAudioEnabled = audioTrack ? audioTrack.enabled : false
+                user.isVideoEnabled = videoTrack ? videoTrack.enabled : false
+            }
+        }
+
+        // 接続状態の監視
+        peerConnection.onconnectionstatechange = () => {
+            console.log(`接続状態変更 (${targetUserId}):`, peerConnection.connectionState)
+
+            const user = remoteUsers.get(targetUserId)
+            if (user) {
+                switch (peerConnection.connectionState) {
+                    case 'connected':
+                        connectionError.value = null
+                        console.log(`${targetUserId} との接続が確立されました`)
+                        break
+                    case 'disconnected':
+                        console.log(`${targetUserId} との接続が切断されました`)
+                        break
+                    case 'failed':
+                        console.error(`${targetUserId} との接続が失敗しました`)
+                        // 接続失敗時の再試行（最大3回）
+                        if (!user.retryCount) user.retryCount = 0
+                        if (user.retryCount < 3) {
+                            user.retryCount++
+                            setTimeout(() => {
+                                if (remoteUsers.has(targetUserId)) {
+                                    console.log(`${targetUserId} との接続を再試行中... (${user.retryCount}/3)`)
+                                    restartConnection(targetUserId)
+                                }
+                            }, 2000 * user.retryCount)
+                        } else {
+                            connectionError.value = `${user.nickname}との接続に失敗しました`
+                            endCallWithUser(targetUserId)
+                        }
+                        break
+                    case 'closed':
+                        console.log(`${targetUserId} との接続が閉じられました`)
+                        break
+                }
+            }
+        }
+
+        // ICE接続失敗の監視
+        peerConnection.oniceconnectionstatechange = () => {
+            console.log(`ICE接続状態変更 (${targetUserId}):`, peerConnection.iceConnectionState)
+
+            if (peerConnection.iceConnectionState === 'failed') {
+                console.error(`ICE接続失敗 (${targetUserId})`)
+                connectionError.value = 'ネットワーク接続エラーが発生しました'
+            }
+        }
+
+        return peerConnection
+    }
+
     // 通話開始
-    const startCall = async () => {
+    const startCall = async (targetUserIds: string[] = []) => {
         try {
-            if (!localStream.value) {
-                await getLocalMedia()
+            isConnecting.value = true
+            connectionError.value = null
+
+            // ローカルストリームを取得
+            localStream.value = await getLocalStream(isCameraOn.value)
+            isCallActive.value = true
+
+            // シグナリングサーバーに接続
+            await signaling.connect()
+
+            // 指定されたユーザーとの通話を開始
+            for (const targetUserId of targetUserIds) {
+                await initiateCall(targetUserId)
             }
 
-            isCallActive.value = true
-            callError.value = null
-
-            // 既存の接続されたユーザーに対してピア接続を作成
-            // 実際の実装では、シグナリングサーバーから他のユーザー情報を取得
-
-            return true
+            console.log('通話開始完了')
         } catch (error) {
-            console.error('Failed to start call:', error)
-            callError.value = '通話の開始に失敗しました'
-            return false
+            console.error('通話開始エラー:', error)
+            connectionError.value = '通話の開始に失敗しました'
+        } finally {
+            isConnecting.value = false
+        }
+    }
+
+    // 特定ユーザーとの通話開始
+    const initiateCall = async (targetUserId: string) => {
+        if (!localStream.value) return
+
+        const peerConnection = createPeerConnection(targetUserId)
+
+        // ローカルストリームを追加
+        localStream.value.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream.value!)
+        })
+
+        // ユーザー情報を更新
+        const existingUser = remoteUsers.get(targetUserId)
+        remoteUsers.set(targetUserId, {
+            id: targetUserId,
+            nickname: existingUser?.nickname || 'Unknown',
+            peerConnection,
+            isAudioEnabled: true,
+            isVideoEnabled: false,
+            isInCallRange: true
+        })
+
+        // オファーを作成・送信
+        const offer = await peerConnection.createOffer()
+        await peerConnection.setLocalDescription(offer)
+
+        signaling.sendMessage({
+            type: 'offer',
+            offer,
+            targetUserId
+        })
+
+        activeCallUsers.value.push(targetUserId)
+    }
+
+    // 通話応答
+    const answerCall = async (fromUserId: string, offer: RTCSessionDescriptionInit) => {
+        if (!localStream.value) return
+
+        const peerConnection = createPeerConnection(fromUserId)
+
+        // ローカルストリームを追加
+        localStream.value.getTracks().forEach(track => {
+            peerConnection.addTrack(track, localStream.value!)
+        })
+
+        // ユーザー情報を更新
+        const existingUser = remoteUsers.get(fromUserId)
+        remoteUsers.set(fromUserId, {
+            id: fromUserId,
+            nickname: existingUser?.nickname || 'Unknown',
+            peerConnection,
+            isAudioEnabled: true,
+            isVideoEnabled: false,
+            isInCallRange: true
+        })
+
+        // オファーを設定し、アンサーを作成
+        await peerConnection.setRemoteDescription(offer)
+        const answer = await peerConnection.createAnswer()
+        await peerConnection.setLocalDescription(answer)
+
+        signaling.sendMessage({
+            type: 'answer',
+            answer,
+            targetUserId: fromUserId
+        })
+
+        activeCallUsers.value.push(fromUserId)
+    }
+
+    // 近接通話の管理
+    const updateProximityCall = (nearbyUsers: { id: string, nickname: string, distance: number }[]) => {
+        if (!autoConnect.value) return
+
+        const usersInRange = nearbyUsers.filter(user => user.distance <= callRadius.value)
+        const userIdsInRange = usersInRange.map(user => user.id)
+
+        // 範囲内の新しいユーザーとの通話を開始
+        for (const user of usersInRange) {
+            if (!remoteUsers.has(user.id) && !activeCallUsers.value.includes(user.id)) {
+                remoteUsers.set(user.id, {
+                    id: user.id,
+                    nickname: user.nickname,
+                    isAudioEnabled: false,
+                    isVideoEnabled: false,
+                    distance: user.distance,
+                    isInCallRange: true
+                })
+
+                // 通話を開始
+                initiateCall(user.id)
+            }
+        }
+
+        // 範囲外のユーザーとの通話を終了
+        for (const [userId, user] of remoteUsers.entries()) {
+            if (!userIdsInRange.includes(userId)) {
+                endCallWithUser(userId)
+            } else {
+                // 距離を更新
+                const userInfo = usersInRange.find(u => u.id === userId)
+                if (userInfo) {
+                    user.distance = userInfo.distance
+                }
+            }
+        }
+    }
+
+    // 特定ユーザーとの通話終了
+    const endCallWithUser = (userId: string) => {
+        const user = remoteUsers.get(userId)
+        if (user?.peerConnection) {
+            user.peerConnection.close()
+        }
+        remoteUsers.delete(userId)
+
+        const index = activeCallUsers.value.indexOf(userId)
+        if (index > -1) {
+            activeCallUsers.value.splice(index, 1)
+        }
+    }
+
+    // 接続の再開
+    const restartConnection = async (targetUserId: string) => {
+        endCallWithUser(targetUserId)
+        await initiateCall(targetUserId)
+    }
+
+    // マイクのオン/オフ
+    const toggleMicrophone = async () => {
+        if (!localStream.value) return
+
+        const audioTrack = localStream.value.getAudioTracks()[0]
+        if (audioTrack) {
+            audioTrack.enabled = !audioTrack.enabled
+            isMicrophoneOn.value = audioTrack.enabled
+
+            // 他のユーザーに音声状態を通知
+            signaling.sendMessage({
+                type: 'audio-toggle',
+                enabled: audioTrack.enabled
+            })
+        }
+    }
+
+    // カメラのオン/オフ
+    const toggleCamera = async () => {
+        try {
+            if (!localStream.value) return
+
+            const videoTrack = localStream.value.getVideoTracks()[0]
+
+            if (videoTrack) {
+                // 既存のビデオトラックのオン/オフ
+                videoTrack.enabled = !videoTrack.enabled
+                isCameraOn.value = videoTrack.enabled
+            } else if (!isCameraOn.value) {
+                // 新しいビデオトラックを追加
+                const videoStream = await navigator.mediaDevices.getUserMedia({ video: getMediaConstraints(true).video })
+                const newVideoTrack = videoStream.getVideoTracks()[0]
+
+                if (newVideoTrack) {
+                    localStream.value.addTrack(newVideoTrack)
+                    isCameraOn.value = true
+
+                    // 既存の接続にビデオトラックを追加
+                    for (const [_userId, user] of remoteUsers.entries()) {
+                        if (user.peerConnection) {
+                            user.peerConnection.addTrack(newVideoTrack, localStream.value)
+                        }
+                    }
+                }
+            }
+
+            // 他のユーザーにビデオ状態を通知
+            signaling.sendMessage({
+                type: 'video-toggle',
+                enabled: isCameraOn.value
+            })
+        } catch (error) {
+            console.error('カメラ切り替えエラー:', error)
+        }
+    }
+
+    // 画面共有のオン/オフ
+    const toggleScreenShare = async () => {
+        try {
+            if (!isScreenSharing.value) {
+                // 画面共有開始
+                const screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: true
+                })
+
+                const screenTrack = screenStream.getVideoTracks()[0]
+
+                // 既存のビデオトラックを画面共有に置き換え
+                for (const [_userId, user] of remoteUsers.entries()) {
+                    if (user.peerConnection) {
+                        const sender = user.peerConnection.getSenders().find(s =>
+                            s.track && s.track.kind === 'video'
+                        )
+                        if (sender) {
+                            await sender.replaceTrack(screenTrack)
+                        }
+                    }
+                }
+
+                isScreenSharing.value = true
+
+                // 画面共有終了時の処理
+                screenTrack.onended = () => {
+                    isScreenSharing.value = false
+                    // 元のカメラトラックに戻す
+                    if (isCameraOn.value) {
+                        toggleCamera()
+                    }
+                }
+            } else {
+                // 画面共有終了
+                isScreenSharing.value = false
+                // カメラトラックに戻す処理は onended で実行される
+            }
+        } catch (error) {
+            console.error('画面共有エラー:', error)
         }
     }
 
     // 通話終了
     const endCall = () => {
-        // すべてのピア接続を閉じる
-        peerConnections.forEach(pc => {
-            pc.close()
-        })
-        peerConnections.clear()
+        // 全ての接続を閉じる
+        for (const [userId] of remoteUsers.entries()) {
+            endCallWithUser(userId)
+        }
 
         // ローカルストリームを停止
         if (localStream.value) {
@@ -103,303 +461,72 @@ export function useWebRTCCall(roomId: string, userId: string, nickname: string) 
             localStream.value = null
         }
 
-        // 画面共有ストリームを停止
-        if (screenStream.value) {
-            screenStream.value.getTracks().forEach(track => track.stop())
-            screenStream.value = null
-        }
+        // シグナリング接続を閉じる
+        signaling.disconnect()
 
         // 状態をリセット
         isCallActive.value = false
-        isMicrophoneOn.value = false
-        isCameraOn.value = false
         isScreenSharing.value = false
-        remoteUsers.value.clear()
-        callError.value = null
+        activeCallUsers.value = []
+        connectionError.value = null
     }
 
-    // マイクのオン/オフ
-    const toggleMicrophone = async () => {
-        if (!localStream.value) {
-            await getLocalMedia({ audio: true, video: isCameraOn.value })
+    // シグナリングメッセージの処理
+    signaling.onMessage((message) => {
+        switch (message.type) {
+            case 'offer':
+                answerCall(message.fromUserId, message.offer)
+                break
+            case 'answer':
+                handleAnswer(message.fromUserId, message.answer)
+                break
+            case 'ice-candidate':
+                handleIceCandidate(message.fromUserId, message.candidate)
+                break
+            case 'audio-toggle':
+                handleAudioToggle(message.fromUserId, message.enabled)
+                break
+            case 'video-toggle':
+                handleVideoToggle(message.fromUserId, message.enabled)
+                break
         }
+    })
 
-        if (localStream.value) {
-            const audioTracks = localStream.value.getAudioTracks()
-            audioTracks.forEach(track => {
-                track.enabled = !track.enabled
-            })
-            isMicrophoneOn.value = !isMicrophoneOn.value
-        }
-    }
-
-    // カメラのオン/オフ
-    const toggleCamera = async () => {
-        if (!localStream.value) {
-            await getLocalMedia({ audio: isMicrophoneOn.value, video: true })
-        }
-
-        if (localStream.value) {
-            const videoTracks = localStream.value.getVideoTracks()
-            videoTracks.forEach(track => {
-                track.enabled = !track.enabled
-            })
-            isCameraOn.value = !isCameraOn.value
-        }
-    }
-
-    // 画面共有の開始/停止
-    const toggleScreenShare = async () => {
-        if (isScreenSharing.value) {
-            await stopScreenShare()
-        } else {
-            await startScreenShare()
+    // アンサー処理
+    const handleAnswer = async (fromUserId: string, answer: RTCSessionDescriptionInit) => {
+        const user = remoteUsers.get(fromUserId)
+        if (user?.peerConnection) {
+            await user.peerConnection.setRemoteDescription(answer)
         }
     }
 
-    // 画面共有開始
-    const startScreenShare = async () => {
-        try {
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: true
-            })
-
-            screenStream.value = stream
-            isScreenSharing.value = true
-
-            // 画面共有が終了したときの処理
-            stream.getVideoTracks()[0].addEventListener('ended', () => {
-                stopScreenShare()
-            })
-
-            // 既存のピア接続のビデオトラックを画面共有に置き換え
-            peerConnections.forEach(async (pc, _userId) => {
-                const sender = pc.getSenders().find(s =>
-                    s.track && s.track.kind === 'video'
-                )
-
-                if (sender && stream.getVideoTracks().length > 0) {
-                    await sender.replaceTrack(stream.getVideoTracks()[0])
-                }
-            })
-
-        } catch (error) {
-            console.error('Failed to start screen share:', error)
-            callError.value = '画面共有の開始に失敗しました'
+    // ICE候補処理
+    const handleIceCandidate = async (fromUserId: string, candidate: RTCIceCandidate) => {
+        const user = remoteUsers.get(fromUserId)
+        if (user?.peerConnection) {
+            await user.peerConnection.addIceCandidate(candidate)
         }
     }
 
-    // 画面共有停止
-    const stopScreenShare = async () => {
-        if (screenStream.value) {
-            screenStream.value.getTracks().forEach(track => track.stop())
-            screenStream.value = null
-        }
-
-        isScreenSharing.value = false
-
-        // カメラストリームに戻す
-        if (localStream.value && isCameraOn.value) {
-            const videoTrack = localStream.value.getVideoTracks()[0]
-
-            peerConnections.forEach(async (pc, _userId) => {
-                const sender = pc.getSenders().find(s =>
-                    s.track && s.track.kind === 'video'
-                )
-
-                if (sender && videoTrack) {
-                    await sender.replaceTrack(videoTrack)
-                }
-            })
+    // 音声状態変更の処理
+    const handleAudioToggle = (fromUserId: string, enabled: boolean) => {
+        const user = remoteUsers.get(fromUserId)
+        if (user) {
+            user.isAudioEnabled = enabled
         }
     }
 
-    // ピア接続の作成
-    const createPeerConnection = (remoteUserId: string): RTCPeerConnection => {
-        const pc = new RTCPeerConnection(rtcConfiguration)
-
-        // ICE候補の処理
-        pc.onicecandidate = (event) => {
-            if (event.candidate) {
-                // 実際の実装では、シグナリングサーバーを通じて相手に送信
-                console.log('ICE candidate:', event.candidate)
-                sendSignalingMessage(remoteUserId, {
-                    type: 'ice-candidate',
-                    candidate: event.candidate
-                })
-            }
+    // ビデオ状態変更の処理
+    const handleVideoToggle = (fromUserId: string, enabled: boolean) => {
+        const user = remoteUsers.get(fromUserId)
+        if (user) {
+            user.isVideoEnabled = enabled
         }
-
-        // リモートストリームの受信
-        pc.ontrack = (event) => {
-            console.log('Received remote stream:', event.streams[0])
-            const remoteUser = remoteUsers.value.get(remoteUserId)
-            if (remoteUser) {
-                remoteUser.stream = event.streams[0]
-                remoteUsers.value.set(remoteUserId, remoteUser)
-            }
-        }
-
-        // 接続状態の監視
-        pc.onconnectionstatechange = () => {
-            console.log(`Connection state with ${remoteUserId}:`, pc.connectionState)
-            if (pc.connectionState === 'failed') {
-                // 接続失敗時の処理
-                removePeerConnection(remoteUserId)
-            }
-        }
-
-        // ローカルストリームを追加
-        if (localStream.value) {
-            localStream.value.getTracks().forEach(track => {
-                pc.addTrack(track, localStream.value!)
-            })
-        }
-
-        peerConnections.set(remoteUserId, pc)
-        return pc
-    }
-
-    // ピア接続の削除
-    const removePeerConnection = (userId: string) => {
-        const pc = peerConnections.get(userId)
-        if (pc) {
-            pc.close()
-            peerConnections.delete(userId)
-        }
-
-        remoteUsers.value.delete(userId)
-    }
-
-    // オファーの作成と送信
-    const createOffer = async (remoteUserId: string) => {
-        const pc = createPeerConnection(remoteUserId)
-
-        try {
-            const offer = await pc.createOffer()
-            await pc.setLocalDescription(offer)
-
-            // 実際の実装では、シグナリングサーバーを通じて送信
-            sendSignalingMessage(remoteUserId, {
-                type: 'offer',
-                offer: offer
-            })
-
-        } catch (error) {
-            console.error('Failed to create offer:', error)
-            callError.value = 'オファーの作成に失敗しました'
-        }
-    }
-
-    // オファーの処理
-    const handleOffer = async (remoteUserId: string, offer: RTCSessionDescriptionInit) => {
-        const pc = createPeerConnection(remoteUserId)
-
-        try {
-            await pc.setRemoteDescription(offer)
-            const answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
-
-            sendSignalingMessage(remoteUserId, {
-                type: 'answer',
-                answer: answer
-            })
-
-        } catch (error) {
-            console.error('Failed to handle offer:', error)
-            callError.value = 'オファーの処理に失敗しました'
-        }
-    }
-
-    // アンサーの処理
-    const handleAnswer = async (remoteUserId: string, answer: RTCSessionDescriptionInit) => {
-        const pc = peerConnections.get(remoteUserId)
-        if (pc) {
-            try {
-                await pc.setRemoteDescription(answer)
-            } catch (error) {
-                console.error('Failed to handle answer:', error)
-                callError.value = 'アンサーの処理に失敗しました'
-            }
-        }
-    }
-
-    // ICE候補の処理
-    const handleIceCandidate = async (remoteUserId: string, candidate: RTCIceCandidateInit) => {
-        const pc = peerConnections.get(remoteUserId)
-        if (pc) {
-            try {
-                await pc.addIceCandidate(candidate)
-            } catch (error) {
-                console.error('Failed to add ICE candidate:', error)
-            }
-        }
-    }
-
-    // シグナリングメッセージの送信
-    const sendSignalingMessage = (targetUserId: string, message: any) => {
-        signalingClient.sendWebRTCSignal(targetUserId, message)
-    }
-
-    // シグナリングメッセージの受信監視
-    const startSignalingListener = () => {
-        signalingClient.on('webrtc-signal', async (fromUserId: string, signal: any) => {
-            switch (signal.type) {
-                case 'offer':
-                    await handleOffer(fromUserId, signal.offer)
-                    break
-                case 'answer':
-                    await handleAnswer(fromUserId, signal.answer)
-                    break
-                case 'ice-candidate':
-                    await handleIceCandidate(fromUserId, signal.candidate)
-                    break
-            }
-        })
-
-        // 新しいユーザーが参加したときの処理
-        signalingClient.on('user-joined', (user) => {
-            addUser({
-                id: user.id,
-                nickname: user.nickname
-            })
-        })
-
-        // ユーザーが退出したときの処理
-        signalingClient.on('user-left', (userId) => {
-            removeUser(userId)
-        })
-
-        // 既存のユーザー一覧を受信したときの処理
-        signalingClient.on('room-users', (users) => {
-            users.forEach(user => {
-                addUser({
-                    id: user.id,
-                    nickname: user.nickname
-                })
-            })
-        })
-    }
-
-    // 新しいユーザーの追加
-    const addUser = (user: CallUser) => {
-        remoteUsers.value.set(user.id, user)
-
-        // 通話中の場合、新しいユーザーとのピア接続を作成
-        if (isCallActive.value) {
-            createOffer(user.id)
-        }
-    }
-
-    // ユーザーの削除
-    const removeUser = (userId: string) => {
-        removePeerConnection(userId)
     }
 
     // 初期化
     onMounted(() => {
-        startSignalingListener()
+        startCall()
     })
 
     // クリーンアップ
@@ -409,13 +536,17 @@ export function useWebRTCCall(roomId: string, userId: string, nickname: string) 
 
     return {
         // 状態
+        localStream,
+        remoteUsers,
         isCallActive,
         isMicrophoneOn,
         isCameraOn,
         isScreenSharing,
-        localStream,
-        remoteUsers,
-        callError,
+        connectionError,
+        isConnecting,
+        activeCallUsers,
+        callRadius,
+        autoConnect,
 
         // メソッド
         startCall,
@@ -423,13 +554,8 @@ export function useWebRTCCall(roomId: string, userId: string, nickname: string) 
         toggleMicrophone,
         toggleCamera,
         toggleScreenShare,
-        addUser,
-        removeUser,
-
-        // WebRTC固有
-        createOffer,
-        handleOffer,
-        handleAnswer,
-        handleIceCandidate
+        updateProximityCall,
+        endCallWithUser,
+        initiateCall
     }
 }

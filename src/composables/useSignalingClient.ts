@@ -142,9 +142,12 @@ export function useSignalingClient(roomId: string, userId: string, nickname: str
                 break
 
             case 'webrtc-signal':
+                // 新しいサーバー形式に対応
+                const signal = message.signal || message
                 eventHandlers['webrtc-signal'].forEach(handler =>
-                    handler(message.fromUserId, message.message)
+                    handler(message.fromUserId, signal)
                 )
+                console.log('WebRTCシグナル受信:', message.signalType || signal.type, 'from:', message.fromUserId)
                 break
 
             case 'chat-message':
@@ -171,11 +174,13 @@ export function useSignalingClient(roomId: string, userId: string, nickname: str
 
     // WebRTCシグナリングメッセージの送信
     const sendWebRTCSignal = (targetUserId: string, signal: WebRTCSignal) => {
-        sendMessage({
-            type: 'webrtc-signal',
-            targetUserId,
-            signal
-        })
+        // 直接的なWebRTCメッセージとして送信
+        const message = {
+            ...signal,
+            targetUserId: targetUserId
+        }
+        sendMessage(message as any)
+        console.log('WebRTCシグナル送信:', signal.type, 'to:', targetUserId)
     }
 
     // 位置更新の送信
@@ -215,6 +220,23 @@ export function useSignalingClient(roomId: string, userId: string, nickname: str
             never
     ) => {
         eventHandlers[event].add(handler as any)
+    }
+
+    // メッセージリスナーの追加（WebRTC用）
+    const onMessage = (handler: (message: any) => void) => {
+        const allMessageHandler = (message: SignalingMessage) => {
+            handler(message)
+        }
+
+        // 全てのメッセージタイプに対してハンドラーを追加
+        ws.value?.addEventListener('message', (event) => {
+            try {
+                const message: SignalingMessage = JSON.parse(event.data)
+                allMessageHandler(message)
+            } catch (error) {
+                console.error('メッセージ解析エラー:', error)
+            }
+        })
     }
 
     // イベントリスナーの削除
@@ -272,11 +294,13 @@ export function useSignalingClient(roomId: string, userId: string, nickname: str
         // メソッド
         connect,
         disconnect,
+        sendMessage,
         sendWebRTCSignal,
         sendPositionUpdate,
         sendMediaUpdate,
         sendChatMessage,
         on,
-        off
+        off,
+        onMessage
     }
 }

@@ -8,6 +8,7 @@ export interface User {
     position: { x: number; y: number }
     isActive: boolean
     isSpeaking: boolean
+    isVideoEnabled: boolean
     joinedAt: Date
 }
 
@@ -96,6 +97,7 @@ export function useRealtimeSync(roomId: string, userId: string, nickname: string
                 position: user.position,
                 isActive: true,
                 isSpeaking: false,
+                isVideoEnabled: false,
                 joinedAt: new Date()
             }
             addOrUpdateUser(newUser)
@@ -134,6 +136,7 @@ export function useRealtimeSync(roomId: string, userId: string, nickname: string
                     position: user.position,
                     isActive: true,
                     isSpeaking: false,
+                    isVideoEnabled: false,
                     joinedAt: new Date()
                 }
                 addOrUpdateUser(newUser)
@@ -194,12 +197,6 @@ export function useRealtimeSync(roomId: string, userId: string, nickname: string
     const broadcastUserRemoval = (userId: string) => {
         if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('user-removal', { detail: userId }))
-        }
-    }
-
-    const broadcastChatMessage = (message: ChatMessage) => {
-        if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('chat-message', { detail: message }))
         }
     }
 

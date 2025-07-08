@@ -19,14 +19,112 @@
       </div>
     </div>
 
+    <!-- リアルタイムデバッグパネル（ドラッグ可能） -->
+    <div
+      class="debug-panel"
+      ref="debugPanelRef"
+      :style="{ left: debugPanelPosition.x + 'px', top: debugPanelPosition.y + 'px' }"
+      @mousedown="startDragDebugPanel"
+    >
+      <div class="debug-header">
+        <h4>🔧 デバッグパネル（ドラッグ可能）</h4>
+        <button @click="toggleDebugMinimized" class="debug-toggle">
+          {{ isDebugMinimized ? '▼' : '▲' }}
+        </button>
+      </div>
+
+      <div v-if="!isDebugMinimized" class="debug-content">
+        <div class="debug-info">
+          <div class="debug-section">
+            <h5>🌐 接続状態</h5>
+            <div class="debug-item">
+              <span>現在時刻:</span>
+              <span>{{ currentTime }}</span>
+            </div>
+            <div class="debug-item">
+              <span>WebSocket接続:</span>
+              <span :class="{ connected: signalingClient.isConnected.value, disconnected: !signalingClient.isConnected.value }">
+                {{ signalingClient.isConnected.value ? '✅ 接続中' : '❌ 切断' }}
+              </span>
+            </div>
+            <div class="debug-item">
+              <span>接続ユーザー数:</span>
+              <span>{{ connectedUsers.length }}人</span>
+            </div>
+            <div v-if="signalingClient.connectionError.value" class="debug-item error">
+              <span>エラー:</span>
+              <span>{{ signalingClient.connectionError.value }}</span>
+            </div>
+          </div>
+
+          <div class="debug-section">
+            <h5>💬 チャット状態</h5>
+            <div class="debug-item">
+              <span>チャット表示:</span>
+              <span>{{ showChat ? 'オープン' : 'クローズ' }}</span>
+            </div>
+            <div class="debug-item">
+              <span>未読メッセージ:</span>
+              <span>{{ unreadCount }}件</span>
+            </div>
+            <div class="debug-item">
+              <span>メッセージ履歴:</span>
+              <span>{{ chatMessages.length }}件</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="connectedUsers.length > 0" class="connected-users">
+          <h5>👥 接続中のユーザー:</h5>
+          <div v-for="user in connectedUsers" :key="user.id" class="user-item">
+            <span class="user-nickname">{{ user.nickname }}</span>
+            <span class="user-position">({{ Math.round(user.position.x) }}, {{ Math.round(user.position.y) }})</span>
+            <div class="user-actions">
+              <button @click="startAudioCallWithUser(user)" class="call-btn audio">🎤</button>
+              <button @click="startVideoCallWithUser(user)" class="call-btn video">📹</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="debug-controls">
+          <button @click="testConnection" class="debug-btn">🔗 接続テスト</button>
+          <button @click="testAudioCall" class="debug-btn">🎤 音声テスト</button>
+          <button @click="testVideoCall" class="debug-btn">📹 ビデオテスト</button>
+          <button @click="requestMediaPermissions" class="debug-btn">🔐 権限取得</button>
+          <button @click="toggleChat" class="debug-btn">
+            💬 チャット {{ unreadCount > 0 ? `(${unreadCount})` : '' }}
+          </button>
+          <button @click="sendTestMessage" class="debug-btn">📤 テストメッセージ</button>
+        </div>
+      </div>
+    </div>
+
     <div
       class="office-container"
       :class="{ 'top-view': isTopView }"
       @click="handleSpaceClick"
+      @mousemove="handleMouseMove"
+      @mouseup="handleMouseUp"
       ref="officeContainer"
     >
       <!-- フロアベース -->
       <div class="floor-base"></div>
+
+      <!-- ユーザーアバター（ドラッグ可能） -->
+      <div
+        class="user-avatar"
+        :style="{
+          left: currentUser.position.x + 'px',
+          top: currentUser.position.y + 'px',
+          backgroundColor: currentUser.color
+        }"
+        @mousedown="startDragAvatar"
+        @click.stop
+      >
+        <div class="avatar-emoji">{{ currentUser.avatar }}</div>
+        <div class="avatar-name">{{ currentUser.nickname }}</div>
+        <div class="avatar-status">{{ currentUser.status }}</div>
+      </div>
 
       <!-- 会議室エリア -->
       <div class="workspace-zone meeting-room" :style="{ transform: 'translate(200px, 100px)' }">
@@ -145,16 +243,19 @@
         🌱
       </div>
 
-      <!-- 現在のユーザーアバター -->
+      <!-- 他のユーザーのアバター -->
       <div
-        v-if="currentUser.position"
-        class="current-user-avatar"
+        v-for="user in connectedUsers"
+        :key="user.id"
+        class="other-user-avatar"
         :style="{
-          transform: `translate(${currentUser.position.x}px, ${currentUser.position.y}px)`,
-          transition: 'transform 0.5s ease'
+          left: user.position.x + 'px',
+          top: user.position.y + 'px',
+          backgroundColor: user.color
         }"
       >
-        {{ currentUser.avatar }}
+        <div class="avatar-emoji">😊</div>
+        <div class="avatar-name">{{ user.nickname }}</div>
       </div>
     </div>
 
@@ -214,12 +315,49 @@
         </div>
       </div>
     </div>
+
+    <!-- 近接ビデオ通話システム -->
+    <div class="proximity-video-call-wrapper">
+      <ProximityVideoCall
+        :current-position="currentUser.position || { x: 300, y: 300 }"
+        :connected-users="connectedUsers"
+        :call-radius="150"
+        :auto-join-enabled="true"
+        :show-call-range="showCallRange"
+        @call-started="handleCallStarted"
+        @call-ended="handleCallEnded"
+        ref="proximityCallRef"
+      />
+    </div>
+
+    <!-- チャット機能 -->
+    <div class="chat-panel" v-if="showChat">
+      <div class="chat-header">
+        <h3>チャット</h3>
+        <button @click="showChat = false">閉じる</button>
+      </div>
+      <div class="chat-messages">
+        <div v-for="message in chatMessages" :key="message.id" class="chat-message">
+          <span class="user-nickname">{{ message.nickname }}</span>
+          <span class="message-content">{{ message.message }}</span>
+          <span class="timestamp">{{ new Date(message.timestamp).toLocaleTimeString() }}</span>
+        </div>
+      </div>
+      <div class="chat-input">
+        <input v-model="newMessage" @keydown.enter="sendMessage" placeholder="メッセージを入力">
+        <button @click="sendMessage">送信</button>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useSpatialAudio } from '@/composables/useSpatialAudio'
+import { useRealtimeSync } from '@/composables/useRealtimeSync'
+import { useAvatarMovement } from '@/composables/useAvatarMovement'
+import ProximityVideoCall from './ProximityVideoCall.vue'
+import { useSignalingClient } from '@/composables/useSignalingClient'
 
 interface Position {
   x: number
@@ -266,6 +404,85 @@ interface Zone {
 const isTopView = ref(false)
 const officeContainer = ref<HTMLElement>()
 const selectedZone = ref<Zone | null>(null)
+const showCallRange = ref(false)
+
+// ProximityVideoCallコンポーネントのref
+const proximityCallRef = ref<InstanceType<typeof ProximityVideoCall>>()
+
+// ユーザーID生成
+const currentUserId = `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+const roomId = 'office-main' // メインオフィスルーム
+const nickname = localStorage.getItem('user-nickname') || 'ゲスト'
+const userColor = localStorage.getItem('user-color') || '#6366f1'
+
+// 現在のユーザー定義
+const currentUser = reactive({
+  id: currentUserId,
+  nickname: nickname,
+  avatar: '😊',
+  status: 'available',
+  position: { x: 300, y: 300 },
+  color: userColor
+})
+
+// リアルタイム同期
+const realtimeSync = useRealtimeSync(roomId, currentUserId, nickname)
+const signalingClient = useSignalingClient(roomId, currentUserId, nickname)
+
+// チャット機能の状態
+const chatMessages = ref<Array<{
+  id: string
+  userId: string
+  nickname: string
+  message: string
+  timestamp: number
+  color: string
+}>>([])
+const newMessage = ref('')
+const showChat = ref(false)
+const unreadCount = ref(0)
+
+// デバッグパネルのドラッグ機能
+const debugPanelRef = ref<HTMLElement>()
+const debugPanelPosition = ref({ x: 20, y: 20 })
+const isDebugMinimized = ref(false)
+const isDragging = ref(false)
+const dragOffset = ref({ x: 0, y: 0 })
+
+// アバタードラッグ機能
+const isAvatarDragging = ref(false)
+const avatarDragOffset = ref({ x: 0, y: 0 })
+
+// 動的時刻表示
+const currentTime = ref(new Date().toLocaleTimeString())
+
+// 音声制御の状態
+let audioContext: AudioContext | null = null
+let isSpatialAudioEnabled = false
+let spatialAudio: any = null
+
+// アバター移動システム
+const avatarMovement = useAvatarMovement('office-space', (position) => {
+  // 位置更新をサーバーに送信
+  if (realtimeSync.updateUserPosition) {
+    realtimeSync.updateUserPosition(currentUser.id, currentUser.position)
+  }
+  // 現在のユーザー位置を更新
+  currentUser.position = position
+})
+
+// 接続ユーザーをリアルタイム同期から取得
+const connectedUsers = computed(() => {
+  return realtimeSync.connectedUsers.value.map(user => ({
+    id: user.id,
+    nickname: user.nickname,
+    position: user.position,
+    color: user.color,
+    isAudioEnabled: user.isActive,
+    isVideoEnabled: user.isVideoEnabled,
+    isSpeaking: user.isSpeaking
+  }))
+})
 
 // 空間音響システム
 const {
@@ -277,11 +494,6 @@ const {
 } = useSpatialAudio()
 
 // ユーザー情報
-const currentUser = reactive<User>({
-  avatar: '😊',
-  status: 'available'
-})
-
 const availableAvatars = ['😊', '😎', '🤓', '😄', '🙂', '😌', '🤗', '😋', '🤔', '😴']
 
 // 会議室の椅子配置
@@ -496,22 +708,290 @@ const stopAllAudio = () => {
   // 音声停止の実装
 }
 
-onMounted(async () => {
-  // 初期位置設定
-  currentUser.position = { x: 300, y: 300 }
+// 通話関連のハンドラー
+const handleCallStarted = (call: any) => {
+  console.log('通話が開始されました:', call)
+}
 
-  // 空間音響システムの初期化
-  await initializeAudio()
+const handleCallEnded = (callId: string) => {
+  console.log('通話が終了されました:', callId)
+}
 
-  // 環境音の追加
-  addAmbientSound('meeting-room', { x: 200, y: 100 })
-  addAmbientSound('cafe-area', { x: 500, y: 250 })
-  addAmbientSound('office-general', { x: 300, y: 300 })
+// ユーザークリックハンドラー
+const handleUserClick = (user: any) => {
+  console.log('ユーザーをクリックしました:', user.nickname)
+  // 通話機能があれば追加実装
+}
 
-  // リスナー位置の設定
-  if (currentUser.position) {
-    updateListenerPosition(currentUser.position)
+const startAudioCallWithUser = (user: any) => {
+  console.log('音声通話を開始しました:', user.nickname)
+  // 音声通話の実装
+  if (proximityCallRef.value) {
+    proximityCallRef.value.startCall('audio', [user])
   }
+}
+
+const startVideoCallWithUser = (user: any) => {
+  console.log('ビデオ通話を開始しました:', user.nickname)
+  // ビデオ通話の実装
+  if (proximityCallRef.value) {
+    proximityCallRef.value.startCall('video', [user])
+  }
+}
+
+const testAudioCall = async () => {
+  console.log('音声通話テストを実行しました')
+  // 音声通話テストの実装
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    console.log('音声デバイスアクセス成功:', stream)
+    // 3秒後に停止
+    setTimeout(() => {
+      stream.getTracks().forEach(track => track.stop())
+      console.log('音声テスト完了')
+    }, 3000)
+  } catch (error) {
+    console.error('音声テストエラー:', error)
+  }
+}
+
+const testVideoCall = async () => {
+  console.log('ビデオ通話テストを実行しました')
+  // ビデオ通話テストの実装
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+    console.log('ビデオデバイスアクセス成功:', stream)
+    // 3秒後に停止
+    setTimeout(() => {
+      stream.getTracks().forEach(track => track.stop())
+      console.log('ビデオテスト完了')
+    }, 3000)
+  } catch (error) {
+    console.error('ビデオテストエラー:', error)
+  }
+}
+
+const requestMediaPermissions = async () => {
+  console.log('メディア権限を取得中...')
+  try {
+    // まず音声のみ
+    const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    console.log('音声権限取得成功')
+    audioStream.getTracks().forEach(track => track.stop())
+
+    // 次にビデオ
+    const videoStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+    console.log('ビデオ権限取得成功')
+    videoStream.getTracks().forEach(track => track.stop())
+
+    console.log('全てのメディア権限取得完了')
+  } catch (error) {
+    console.error('メディア権限取得エラー:', error)
+  }
+}
+
+// メッセージ送信機能
+const sendMessage = () => {
+  if (!newMessage.value.trim()) return
+
+  const message = {
+    id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    userId: currentUserId,
+    nickname: nickname,
+    message: newMessage.value.trim(),
+    timestamp: Date.now(),
+    color: userColor
+  }
+
+  // ローカルにメッセージ追加
+  chatMessages.value.push(message)
+
+  // サーバーにメッセージ送信
+  signalingClient.sendChatMessage(newMessage.value.trim())
+
+  newMessage.value = ''
+}
+
+// メッセージ受信処理
+const handleMessageReceived = (messageData: any) => {
+  if (messageData.userId !== currentUserId) {
+    chatMessages.value.push(messageData)
+    if (!showChat.value) {
+      unreadCount.value++
+    }
+  }
+}
+
+const toggleChat = () => {
+  showChat.value = !showChat.value
+  // チャットを開いたときに未読カウンターをリセット
+  if (showChat.value) {
+    unreadCount.value = 0
+  }
+}
+
+// デバッグパネルのドラッグ機能
+const startDragDebugPanel = (event: MouseEvent) => {
+  isDragging.value = true
+  const rect = debugPanelRef.value?.getBoundingClientRect()
+  if (rect) {
+    dragOffset.value = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    }
+  }
+
+  // マウスイベントリスナーを追加
+  document.addEventListener('mousemove', dragDebugPanel)
+  document.addEventListener('mouseup', stopDragDebugPanel)
+}
+
+const dragDebugPanel = (event: MouseEvent) => {
+  if (isDragging.value) {
+    debugPanelPosition.value = {
+      x: event.clientX - dragOffset.value.x,
+      y: event.clientY - dragOffset.value.y
+    }
+  }
+}
+
+const stopDragDebugPanel = () => {
+  isDragging.value = false
+  // マウスイベントリスナーを削除
+  document.removeEventListener('mousemove', dragDebugPanel)
+  document.removeEventListener('mouseup', stopDragDebugPanel)
+}
+
+const toggleDebugMinimized = () => {
+  isDebugMinimized.value = !isDebugMinimized.value
+}
+
+// 接続テスト機能
+const testConnection = async () => {
+  console.log('🔗 接続テストを実行中...')
+  try {
+    // WebSocket接続状態確認
+    console.log('WebSocket状態:', signalingClient.isConnected.value ? '接続中' : '切断')
+    console.log('接続エラー:', signalingClient.connectionError.value)
+    console.log('接続ユーザー数:', connectedUsers.value.length)
+
+    // テストメッセージ送信
+    if (signalingClient.isConnected.value) {
+      signalingClient.sendMessage({
+        type: 'test-connection',
+        message: 'connection test from ' + nickname,
+        timestamp: Date.now()
+      })
+      console.log('✅ 接続テスト完了')
+    } else {
+      console.log('❌ WebSocket未接続')
+    }
+  } catch (error) {
+    console.error('❌ 接続テストエラー:', error)
+  }
+}
+
+// テストメッセージ送信
+const sendTestMessage = () => {
+  const testMessage = `テストメッセージ from ${nickname} at ${new Date().toLocaleTimeString()}`
+  console.log('📤 テストメッセージ送信:', testMessage)
+
+  if (signalingClient.isConnected.value) {
+    signalingClient.sendChatMessage(testMessage)
+
+    // ローカルにも追加（自分のメッセージとして）
+    const message = {
+      id: `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      userId: currentUserId,
+      nickname: nickname,
+      message: testMessage,
+      timestamp: Date.now(),
+      color: userColor
+    }
+    chatMessages.value.push(message)
+  } else {
+    console.log('❌ WebSocket未接続のため送信できません')
+  }
+}
+
+// アバタードラッグ機能
+const startDragAvatar = (event: MouseEvent) => {
+  isAvatarDragging.value = true
+  const rect = (event.target as HTMLElement).closest('.office-container')?.getBoundingClientRect()
+  if (rect) {
+    avatarDragOffset.value = {
+      x: event.clientX - rect.left - currentUser.position.x,
+      y: event.clientY - rect.top - currentUser.position.y
+    }
+  }
+  event.preventDefault()
+}
+
+const handleMouseMove = (event: MouseEvent) => {
+  if (isAvatarDragging.value) {
+    const rect = (event.target as HTMLElement).closest('.office-container')?.getBoundingClientRect()
+    if (rect) {
+      const newX = Math.max(0, Math.min(rect.width - 50, event.clientX - rect.left - avatarDragOffset.value.x))
+      const newY = Math.max(0, Math.min(rect.height - 80, event.clientY - rect.top - avatarDragOffset.value.y))
+
+      currentUser.position = { x: newX, y: newY }
+
+      // WebSocketでリアルタイム同期
+      if (realtimeSync.updateUserPosition) {
+        realtimeSync.updateUserPosition(currentUser.id, currentUser.position)
+      }
+    }
+    return
+  }
+
+  if (isDragging.value && debugPanelRef.value) {
+    const newX = event.clientX - dragOffset.value.x
+    const newY = event.clientY - dragOffset.value.y
+
+    const maxX = window.innerWidth - debugPanelRef.value.offsetWidth
+    const maxY = window.innerHeight - debugPanelRef.value.offsetHeight
+
+    debugPanelPosition.value = {
+      x: Math.max(0, Math.min(maxX, newX)),
+      y: Math.max(0, Math.min(maxY, newY))
+    }
+  }
+}
+
+const handleMouseUp = () => {
+  isAvatarDragging.value = false
+  isDragging.value = false
+}
+
+onMounted(async () => {
+  // 初期接続開始（useRealtimeSyncとuseSignalingClientは自動接続）
+
+  // 時刻更新タイマー
+  setInterval(() => {
+    currentTime.value = new Date().toLocaleTimeString()
+  }, 1000)
+
+  // チャットメッセージのイベントリスナー
+  signalingClient.on('chat-message', (message: any) => {
+    if (message.userId !== currentUserId) {
+      const newChatMessage = {
+        id: message.id || `msg-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        userId: message.userId,
+        nickname: message.nickname,
+        message: message.message,
+        timestamp: message.timestamp || Date.now(),
+        color: message.color || '#6366f1'
+      }
+      chatMessages.value.push(newChatMessage)
+      if (!showChat.value) {
+        unreadCount.value++
+      }
+    }
+  })
+
+  // 空間音響システムは手動で有効にする必要がある
+  console.log('空間音響システムは音響ONボタンで有効にしてください')
+  console.log('🔧 デバッグパネルが右上に表示されているはずです')
 })
 
 onUnmounted(() => {
@@ -519,6 +999,10 @@ onUnmounted(() => {
   if (audioState.value.isInitialized) {
     stopAllAudio()
   }
+
+  // ドラッグイベントリスナーのクリーンアップ
+  document.removeEventListener('mousemove', dragDebugPanel)
+  document.removeEventListener('mouseup', stopDragDebugPanel)
 })
 
 // エクスポート
@@ -678,11 +1162,13 @@ defineExpose({
 .chair {
   position: absolute;
   cursor: pointer;
-  transition: var(--transition-normal);
+  transition: all 0.3s ease;
+  transform-origin: center;
 }
 
 .chair:hover {
-  transform: scale(1.1);
+  transform: scale(1.05) !important;
+  filter: brightness(1.1);
 }
 
 .chair.selected {
@@ -721,11 +1207,13 @@ defineExpose({
 .personal-desk {
   position: absolute;
   cursor: pointer;
-  transition: var(--transition-normal);
+  transition: all 0.3s ease;
+  transform-origin: center;
 }
 
 .personal-desk:hover {
-  transform: scale(1.05);
+  transform: scale(1.03) !important;
+  filter: brightness(1.1);
 }
 
 .personal-desk.selected {
@@ -848,10 +1336,67 @@ defineExpose({
 
 .current-user-avatar {
   position: absolute;
+  width: 60px;
+  height: 60px;
+  background: #4CAF50;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 2rem;
   z-index: 100;
-  animation: float 4s ease-in-out infinite;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+}
+
+.other-user-avatar {
+  position: absolute;
+  width: 50px;
+  height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  transition: transform 0.2s ease;
+  z-index: 90;
+}
+
+.other-user-avatar:hover {
+  transform: scale(1.05);
+}
+
+.other-user-avatar .avatar-emoji {
+  font-size: 20px;
+  margin-bottom: 2px;
+}
+
+.other-user-avatar .avatar-name {
+  font-size: 10px;
+  font-weight: bold;
+  color: white;
+  text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  max-width: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-name-tag {
+  position: absolute;
+  bottom: -30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  white-space: nowrap;
   pointer-events: none;
+  z-index: 1000;
 }
 
 .plant {
@@ -962,6 +1507,158 @@ defineExpose({
   color: var(--color-secondary);
 }
 
+/* リアルタイムデバッグパネル（ドラッグ可能） */
+.debug-panel {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(15px);
+  border: 2px solid #4f46e5;
+  border-radius: 12px;
+  padding: 16px;
+  max-width: 350px;
+  min-width: 300px;
+  z-index: 9999;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+  cursor: move;
+  user-select: none;
+  transition: all 0.2s ease;
+  font-size: 14px;
+}
+
+.debug-panel:hover {
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+  transform: scale(1.02);
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 2px solid #4f46e5;
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  cursor: move;
+  background: linear-gradient(90deg, #4f46e5, #7c3aed);
+  margin: -16px -16px 12px -16px;
+  padding: 12px 16px;
+  border-radius: 10px 10px 0 0;
+}
+
+.debug-header h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: white;
+}
+
+.debug-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  color: white;
+  padding: 4px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.debug-toggle:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+}
+
+.debug-content {
+  margin-top: 12px;
+}
+
+.debug-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 8px;
+}
+
+.debug-section h5 {
+  margin: 0 0 8px 0;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.debug-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.debug-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.debug-item.error span:last-child {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.connected-users {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.user-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 8px;
+  margin: 4px 0;
+  background: rgba(99, 102, 241, 0.1);
+  border-radius: 8px;
+}
+
+.user-nickname {
+  font-weight: 600;
+  color: #4f46e5;
+}
+
+.user-position {
+  font-size: 12px;
+  color: #6b7280;
+  font-family: monospace;
+}
+
+.user-actions {
+  display: flex;
+  gap: var(--spacing-2);
+}
+
+.call-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.5rem;
+  color: var(--color-gray-600);
+}
+
+.debug-controls {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.debug-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.5rem;
+  color: var(--color-gray-600);
+}
+
 /* レスポンシブ対応 */
 @media (max-width: 768px) {
   .office-container {
@@ -981,5 +1678,160 @@ defineExpose({
   .workspace-zone {
     transform: scale(0.8) !important;
   }
+}
+
+/* チャット機能 */
+.chat-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  padding: var(--spacing-4);
+  border-top: 1px solid rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+}
+
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.chat-header h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.chat-header button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.5rem;
+  color: var(--color-gray-600);
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-3);
+}
+
+.chat-message {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-2) 0;
+}
+
+.user-nickname {
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.message-content {
+  flex: 1;
+  margin: 0 var(--spacing-2);
+  color: var(--color-gray-700);
+}
+
+.timestamp {
+  font-size: var(--text-sm);
+  color: var(--color-gray-500);
+}
+
+.chat-input {
+  display: flex;
+  gap: var(--spacing-2);
+}
+
+.chat-input input {
+  flex: 1;
+  padding: var(--spacing-2);
+  border: 1px solid var(--color-gray-300);
+  border-radius: var(--radius-md);
+}
+
+.chat-input button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.5rem;
+  color: var(--color-gray-600);
+}
+
+.connected {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.disconnected {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+/* ユーザーアバター（ドラッグ可能） */
+.user-avatar {
+  position: absolute;
+  width: 50px;
+  height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  cursor: grab;
+  user-select: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  z-index: 100;
+}
+
+.user-avatar:hover {
+  transform: scale(1.05);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+}
+
+.user-avatar:active {
+  cursor: grabbing;
+  transform: scale(1.02);
+}
+
+.user-avatar .avatar-emoji {
+  font-size: 20px;
+  margin-bottom: 2px;
+}
+
+.user-avatar .avatar-name {
+  font-size: 10px;
+  font-weight: bold;
+  color: white;
+  text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.5);
+  text-align: center;
+  max-width: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-avatar .avatar-status {
+  font-size: 8px;
+  color: white;
+  text-shadow: 1px 1px 1px rgba(0, 0, 0, 0.5);
+  margin-top: 1px;
+}
+
+/* ProximityVideoCallラッパー */
+.proximity-video-call-wrapper {
+  position: relative;
+  z-index: 8000;
+  pointer-events: none;
+}
+
+.proximity-video-call-wrapper > * {
+  pointer-events: auto;
 }
 </style>

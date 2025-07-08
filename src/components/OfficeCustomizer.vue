@@ -759,13 +759,15 @@ initializeDefaultLayout()
 .placed-item {
   position: absolute;
   cursor: pointer;
-  transition: var(--transition-normal);
+  transition: all 0.3s ease;
   user-select: none;
   z-index: 10;
+  transform-origin: center;
 }
 
 .placed-item:hover {
-  transform: scale(1.05) !important;
+  transform: scale(1.03) !important;
+  filter: brightness(1.1) drop-shadow(0 4px 8px rgba(0, 0, 0, 0.2));
 }
 
 .placed-item.selected {
