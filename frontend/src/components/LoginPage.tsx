@@ -36,7 +36,9 @@ export default function LoginPage() {
         }
       }
     } catch (err) {
-      setError('エラーが発生しました');
+      console.error('Login error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'エラーが発生しました';
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }
