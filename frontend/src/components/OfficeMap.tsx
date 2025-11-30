@@ -3,13 +3,11 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { getSocket, connectSocket } from '@/lib/socket';
-import { useAuth } from './AuthProvider';
 import Avatar from './Avatar';
 import ChatBox from './ChatBox';
-import StatusSelector from './StatusSelector';
-import AvatarCustomizer, { avatarTypes } from './AvatarCustomizer';
 import VideoCall from './VideoCall';
 import { User } from '@/store/useStore';
+import { avatarTypes } from './AvatarCustomizer';
 
 interface Room {
   id: string;
@@ -20,6 +18,10 @@ interface Room {
   height: number;
   color: string;
   type: 'meeting' | 'lounge' | 'focus' | 'open';
+}
+
+interface OfficeMapProps {
+  guestName: string;
 }
 
 const roomIcons: Record<string, string> = {
@@ -44,14 +46,19 @@ const decorations = [
   { type: 'water', x: 960, y: 300, emoji: '🚰' },
 ];
 
-export default function OfficeMap() {
+// ランダムなアバターとカラーを選択
+const randomAvatars = ['cat', 'dog', 'rabbit', 'bear', 'panda', 'fox', 'penguin', 'unicorn'];
+const randomColors = ['#4ECDC4', '#FF6B6B', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
+
+export default function OfficeMap({ guestName }: OfficeMapProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [showAvatarCustomizer, setShowAvatarCustomizer] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showVideoCall, setShowVideoCall] = useState(false);
+  const [myAvatar] = useState(() => randomAvatars[Math.floor(Math.random() * randomAvatars.length)]);
+  const [myColor] = useState(() => randomColors[Math.floor(Math.random() * randomColors.length)]);
+  const [myStatus, setMyStatus] = useState<'online' | 'away' | 'busy' | 'offline'>('online');
 
-  const { user, profile, signOut, updateProfile } = useAuth();
   const {
     currentUser,
     users,
@@ -67,8 +74,6 @@ export default function OfficeMap() {
 
   // Socket.io接続とイベント設定
   useEffect(() => {
-    if (!user) return;
-
     const socket = connectSocket();
 
     socket.on('user-joined', (u) => {
@@ -103,14 +108,14 @@ export default function OfficeMap() {
       addMessage(message);
     });
 
-    // プロフィール情報で参加（プロフィールがない場合はデフォルト値を使用）
+    // ゲストとして参加
     socket.emit('join', {
-      name: profile?.display_name || user.email?.split('@')[0] || 'User',
-      visibilityUserId: profile?.id || user.id,
-      avatarType: profile?.avatar_type || 'cat',
-      avatarUrl: profile?.avatar_url || '',
-      color: profile?.avatar_color || '#4ECDC4',
-      status: profile?.status || 'online',
+      name: guestName,
+      visibilityUserId: `guest-${Date.now()}`,
+      avatarType: myAvatar,
+      avatarUrl: '',
+      color: myColor,
+      status: 'online',
     });
 
     return () => {
@@ -123,30 +128,15 @@ export default function OfficeMap() {
       socket.off('user-updated');
       socket.off('chat-message');
     };
-  }, [user, profile, setCurrentUser, setUsers, addUser, removeUser, updateUserPosition, updateUser, addMessage]);
+  }, [guestName, myAvatar, myColor, setCurrentUser, setUsers, addUser, removeUser, updateUserPosition, updateUser, addMessage]);
 
-  // プロフィール変更時にサーバーに通知
-  useEffect(() => {
-    if (!profile || !currentUser) return;
-
+  // ステータス変更
+  const handleStatusChange = (status: 'online' | 'away' | 'busy' | 'offline') => {
+    setMyStatus(status);
     const socket = getSocket();
-    if (socket.connected) {
-      socket.emit('update-user', {
-        avatarType: profile.avatar_type,
-        avatarUrl: profile.avatar_url || '',
-        color: profile.avatar_color,
-        status: profile.status,
-      });
-
-      // ローカル状態も更新
-      updateCurrentUser({
-        avatarType: profile.avatar_type,
-        avatarUrl: profile.avatar_url || '',
-        color: profile.avatar_color,
-        status: profile.status as 'online' | 'away' | 'busy' | 'offline',
-      });
-    }
-  }, [profile?.avatar_type, profile?.avatar_url, profile?.avatar_color, profile?.status]);
+    socket.emit('update-user', { status });
+    updateCurrentUser({ status });
+  };
 
   // クリックで移動
   const handleMapClick = useCallback(
@@ -220,18 +210,9 @@ export default function OfficeMap() {
     (u) => u.id !== currentUser?.id
   );
 
-  // ヘッダーのアバター表示
-  const getHeaderAvatar = () => {
-    if (profile?.avatar_type === 'custom' && profile?.avatar_url) {
-      return (
-        <img
-          src={profile.avatar_url}
-          alt="avatar"
-          className="w-full h-full object-cover"
-        />
-      );
-    }
-    return avatarTypes[currentUser?.avatarType as keyof typeof avatarTypes]?.emoji || '🐱';
+  // ページを離れる
+  const handleLeave = () => {
+    window.location.reload();
   };
 
   return (
@@ -255,40 +236,43 @@ export default function OfficeMap() {
               <p className="text-xs text-gray-500">みんなで一緒に働こう</p>
             </div>
           </div>
-          <div className="ml-4">
-            <StatusSelector />
+
+          {/* ステータスセレクター */}
+          <div className="ml-4 flex items-center gap-2">
+            <span className="text-xs text-gray-500">ステータス:</span>
+            <select
+              value={myStatus}
+              onChange={(e) => handleStatusChange(e.target.value as 'online' | 'away' | 'busy' | 'offline')}
+              className="text-sm bg-white/50 border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="online">🟢 オンライン</option>
+              <option value="away">🟡 離席中</option>
+              <option value="busy">🔴 取り込み中</option>
+              <option value="offline">⚫ オフライン</option>
+            </select>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
-          {/* アバターカスタマイズボタン */}
-          <button
-            onClick={() => setShowAvatarCustomizer(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white rounded-xl hover:from-violet-600 hover:to-fuchsia-600 transition-all shadow-md hover:shadow-lg text-sm font-medium"
-          >
-            <span>✨</span>
-            アバター変更
-          </button>
-
           {/* ユーザー情報 */}
           <div className="flex items-center gap-3 bg-white/50 rounded-xl px-3 py-2">
             <div
               className="w-10 h-10 rounded-full flex items-center justify-center text-xl overflow-hidden shadow-md"
-              style={{ backgroundColor: profile?.avatar_color || '#4ECDC4' }}
+              style={{ backgroundColor: myColor }}
             >
-              {getHeaderAvatar()}
+              {avatarTypes[myAvatar as keyof typeof avatarTypes]?.emoji || '🐱'}
             </div>
             <div>
-              <p className="text-sm font-medium text-gray-800">{profile?.display_name}</p>
-              <p className="text-xs text-gray-500">{profile?.email}</p>
+              <p className="text-sm font-medium text-gray-800">{guestName}</p>
+              <p className="text-xs text-gray-500">ゲスト</p>
             </div>
           </div>
 
           <button
-            onClick={signOut}
+            onClick={handleLeave}
             className="px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-white/50 rounded-xl transition text-sm font-medium"
           >
-            ログアウト
+            退出
           </button>
         </div>
       </div>
@@ -447,12 +431,6 @@ export default function OfficeMap() {
           </div>
         </div>
       </div>
-
-      {/* アバターカスタマイザー */}
-      <AvatarCustomizer
-        isOpen={showAvatarCustomizer}
-        onClose={() => setShowAvatarCustomizer(false)}
-      />
 
       {/* ユーザー選択メニュー */}
       {selectedUser && (
