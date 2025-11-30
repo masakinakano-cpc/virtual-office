@@ -77,7 +77,9 @@ export default function VideoCall({ targetUser, onClose }: VideoCallProps) {
       // Peerに画面共有ストリームを追加
       if (peerRef.current && stream) {
         const videoTrack = displayStream.getVideoTracks()[0];
-        const sender = peerRef.current._pc?.getSenders().find(
+        // @ts-expect-error - simple-peer internal property
+        const pc = peerRef.current._pc as RTCPeerConnection | undefined;
+        const sender = pc?.getSenders().find(
           (s: RTCRtpSender) => s.track?.kind === 'video'
         );
         if (sender) {
@@ -105,7 +107,9 @@ export default function VideoCall({ targetUser, onClose }: VideoCallProps) {
     if (peerRef.current && stream) {
       const videoTrack = stream.getVideoTracks()[0];
       if (videoTrack) {
-        const sender = peerRef.current._pc?.getSenders().find(
+        // @ts-expect-error - simple-peer internal property
+        const pc = peerRef.current._pc as RTCPeerConnection | undefined;
+        const sender = pc?.getSenders().find(
           (s: RTCRtpSender) => s.track?.kind === 'video'
         );
         if (sender) {
