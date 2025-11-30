@@ -3,11 +3,11 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '@/store/useStore';
 import { getSocket, connectSocket } from '@/lib/socket';
+import { avatarTypes, avatarColors } from '@/lib/avatars';
 import Avatar from './Avatar';
 import ChatBox from './ChatBox';
 import VideoCall from './VideoCall';
 import { User } from '@/store/useStore';
-import { avatarTypes } from './AvatarCustomizer';
 
 interface Room {
   id: string;
@@ -33,30 +33,30 @@ const roomIcons: Record<string, string> = {
 
 // 装飾オブジェクト
 const decorations = [
-  // 観葉植物
   { type: 'plant', x: 220, y: 50, emoji: '🪴' },
   { type: 'plant', x: 770, y: 50, emoji: '🌿' },
   { type: 'plant', x: 220, y: 520, emoji: '🌱' },
   { type: 'plant', x: 770, y: 520, emoji: '🪴' },
-  // コーヒーマシン
   { type: 'coffee', x: 920, y: 380, emoji: '☕' },
-  // 本棚
   { type: 'bookshelf', x: 20, y: 300, emoji: '📚' },
-  // ウォーターサーバー
   { type: 'water', x: 960, y: 300, emoji: '🚰' },
 ];
-
-// ランダムなアバターとカラーを選択
-const randomAvatars = ['cat', 'dog', 'rabbit', 'bear', 'panda', 'fox', 'penguin', 'unicorn'];
-const randomColors = ['#4ECDC4', '#FF6B6B', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD', '#98D8C8', '#F7DC6F'];
 
 export default function OfficeMap({ guestName }: OfficeMapProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showVideoCall, setShowVideoCall] = useState(false);
-  const [myAvatar] = useState(() => randomAvatars[Math.floor(Math.random() * randomAvatars.length)]);
-  const [myColor] = useState(() => randomColors[Math.floor(Math.random() * randomColors.length)]);
+  const [showAvatarCustomizer, setShowAvatarCustomizer] = useState(false);
+
+  // アバター設定
+  const [myAvatar, setMyAvatar] = useState(() => {
+    const avatars = Object.keys(avatarTypes);
+    return avatars[Math.floor(Math.random() * avatars.length)];
+  });
+  const [myColor, setMyColor] = useState(() => {
+    return avatarColors[Math.floor(Math.random() * avatarColors.length)].color;
+  });
   const [myStatus, setMyStatus] = useState<'online' | 'away' | 'busy' | 'offline'>('online');
 
   const {
@@ -130,6 +130,15 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
     };
   }, [guestName, myAvatar, myColor, setCurrentUser, setUsers, addUser, removeUser, updateUserPosition, updateUser, addMessage]);
 
+  // アバター更新
+  const updateAvatar = (newAvatar: string, newColor: string) => {
+    setMyAvatar(newAvatar);
+    setMyColor(newColor);
+    const socket = getSocket();
+    socket.emit('update-user', { avatarType: newAvatar, color: newColor });
+    updateCurrentUser({ avatarType: newAvatar, color: newColor });
+  };
+
   // ステータス変更
   const handleStatusChange = (status: 'online' | 'away' | 'busy' | 'offline') => {
     setMyStatus(status);
@@ -147,10 +156,8 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
       const x = Math.max(30, Math.min(970, e.clientX - rect.left));
       const y = Math.max(30, Math.min(570, e.clientY - rect.top));
 
-      // ローカルで即時更新
       updateCurrentUser({ x, y });
 
-      // サーバーに送信
       const socket = getSocket();
       socket.emit('move', { x, y });
     },
@@ -161,7 +168,6 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!currentUser) return;
-      // 入力フォーカス中は無視
       if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
         return;
       }
@@ -205,14 +211,19 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentUser, updateCurrentUser]);
 
-  // 他のユーザー（自分以外）
   const otherUsers = Array.from(users.values()).filter(
     (u) => u.id !== currentUser?.id
   );
 
-  // ページを離れる
   const handleLeave = () => {
     window.location.reload();
+  };
+
+  const statusInfo = {
+    online: { label: 'オンライン', color: 'bg-green-500', icon: '🟢' },
+    away: { label: '離席中', color: 'bg-yellow-500', icon: '🟡' },
+    busy: { label: '取り込み中', color: 'bg-red-500', icon: '🔴' },
+    offline: { label: 'オフライン', color: 'bg-gray-400', icon: '⚫' },
   };
 
   return (
@@ -238,39 +249,50 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
           </div>
 
           {/* ステータスセレクター */}
-          <div className="ml-4 flex items-center gap-2">
-            <span className="text-xs text-gray-500">ステータス:</span>
+          <div className="ml-4 relative">
             <select
               value={myStatus}
-              onChange={(e) => handleStatusChange(e.target.value as 'online' | 'away' | 'busy' | 'offline')}
-              className="text-sm bg-white/50 border border-gray-200 rounded-lg px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              onChange={(e) => handleStatusChange(e.target.value as typeof myStatus)}
+              className="appearance-none text-sm bg-white/70 backdrop-blur border border-gray-200 rounded-xl pl-8 pr-10 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer font-medium text-gray-700"
             >
-              <option value="online">🟢 オンライン</option>
-              <option value="away">🟡 離席中</option>
-              <option value="busy">🔴 取り込み中</option>
-              <option value="offline">⚫ オフライン</option>
+              {Object.entries(statusInfo).map(([key, { label, icon }]) => (
+                <option key={key} value={key}>{icon} {label}</option>
+              ))}
             </select>
+            <div className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${statusInfo[myStatus].color}`}></div>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
+          {/* アバター変更ボタン */}
+          <button
+            onClick={() => setShowAvatarCustomizer(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white rounded-xl hover:from-violet-600 hover:to-fuchsia-600 transition-all shadow-md hover:shadow-lg text-sm font-medium"
+          >
+            <span>✨</span>
+            アバター変更
+          </button>
+
           {/* ユーザー情報 */}
-          <div className="flex items-center gap-3 bg-white/50 rounded-xl px-3 py-2">
+          <div className="flex items-center gap-3 bg-white/60 backdrop-blur rounded-xl px-4 py-2 border border-white/50">
             <div
-              className="w-10 h-10 rounded-full flex items-center justify-center text-xl overflow-hidden shadow-md"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-xl shadow-md ring-2 ring-white"
               style={{ backgroundColor: myColor }}
             >
-              {avatarTypes[myAvatar as keyof typeof avatarTypes]?.emoji || '🐱'}
+              {avatarTypes[myAvatar]?.emoji || '🐱'}
             </div>
             <div>
-              <p className="text-sm font-medium text-gray-800">{guestName}</p>
-              <p className="text-xs text-gray-500">ゲスト</p>
+              <p className="text-sm font-semibold text-gray-800">{guestName}</p>
+              <p className="text-xs text-gray-500 flex items-center gap-1">
+                <span className={`w-2 h-2 rounded-full ${statusInfo[myStatus].color}`}></span>
+                {statusInfo[myStatus].label}
+              </p>
             </div>
           </div>
 
           <button
             onClick={handleLeave}
-            className="px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-white/50 rounded-xl transition text-sm font-medium"
+            className="px-4 py-2 text-gray-600 hover:text-white hover:bg-red-500 rounded-xl transition text-sm font-medium border border-gray-200 hover:border-red-500"
           >
             退出
           </button>
@@ -299,27 +321,19 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
 
           {/* 中央のワークエリア */}
           <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-            {/* ワークエリアの床 */}
             <div className="absolute -inset-16 bg-gradient-to-br from-slate-50 to-slate-100 rounded-3xl opacity-50"></div>
-
-            {/* デスク配置 */}
             <div className="relative grid grid-cols-4 gap-8">
               {[...Array(8)].map((_, i) => (
                 <div key={i} className="relative group">
-                  {/* デスク */}
                   <div className="w-24 h-16 bg-gradient-to-br from-amber-50 to-amber-100 rounded-xl border border-amber-200/50 shadow-md flex items-center justify-center relative overflow-hidden">
-                    {/* デスクの木目風パターン */}
                     <div className="absolute inset-0 opacity-20" style={{
                       backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 10px, rgba(180, 140, 100, 0.1) 10px, rgba(180, 140, 100, 0.1) 11px)'
                     }}></div>
-                    {/* モニター */}
                     <div className="w-8 h-6 bg-gradient-to-b from-gray-700 to-gray-800 rounded-sm shadow-inner flex items-center justify-center">
                       <div className="w-6 h-4 bg-gradient-to-br from-blue-400 to-blue-500 rounded-sm"></div>
                     </div>
                   </div>
-                  {/* 椅子 */}
                   <div className="absolute -bottom-3 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-gradient-to-b from-gray-600 to-gray-700 rounded-full shadow-md border-2 border-gray-500"></div>
-                  {/* デスク番号 */}
                   <div className="absolute -top-2 -right-2 w-5 h-5 bg-white rounded-full shadow text-xs flex items-center justify-center text-gray-500 font-medium">
                     {i + 1}
                   </div>
@@ -342,18 +356,11 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
                 borderColor: 'rgba(255,255,255,0.8)',
               }}
             >
-              {/* ルーム内装飾 */}
               <div className="absolute inset-2 rounded-xl border border-white/30"></div>
-
               <div className="relative z-10 text-center">
                 <span className="text-3xl mb-2 block group-hover:scale-110 transition-transform">{roomIcons[room.type]}</span>
                 <span className="text-sm font-semibold text-gray-700">{room.name}</span>
-                <div className="mt-1 text-xs text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity">
-                  クリックして入室
-                </div>
               </div>
-
-              {/* ルームのソファや家具（ラウンジのみ） */}
               {room.type === 'lounge' && (
                 <>
                   <div className="absolute bottom-3 left-3 w-12 h-6 bg-rose-300 rounded-lg shadow-inner"></div>
@@ -363,13 +370,12 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
             </div>
           ))}
 
-          {/* 装飾オブジェクト */}
+          {/* 装飾 */}
           {decorations.map((deco, i) => (
             <div
               key={i}
               className="absolute text-2xl transition-transform hover:scale-125"
               style={{ left: deco.x, top: deco.y }}
-              title={deco.type}
             >
               {deco.emoji}
             </div>
@@ -432,6 +438,93 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
         </div>
       </div>
 
+      {/* アバターカスタマイザー */}
+      {showAvatarCustomizer && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white px-6 py-4">
+              <h2 className="text-xl font-bold">アバターをカスタマイズ</h2>
+              <p className="text-violet-100 text-sm">キャラクターと色を選んでね</p>
+            </div>
+
+            <div className="p-6">
+              {/* プレビュー */}
+              <div className="flex justify-center mb-6">
+                <div
+                  className="w-24 h-24 rounded-full flex items-center justify-center text-5xl shadow-lg ring-4 ring-white"
+                  style={{ backgroundColor: myColor }}
+                >
+                  {avatarTypes[myAvatar]?.emoji || '🐱'}
+                </div>
+              </div>
+
+              {/* キャラクター選択 */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">キャラクター</h3>
+                <div className="grid grid-cols-4 gap-2">
+                  {Object.entries(avatarTypes).map(([key, { emoji, name }]) => (
+                    <button
+                      key={key}
+                      onClick={() => setMyAvatar(key)}
+                      className={`flex flex-col items-center p-2 rounded-xl transition-all ${
+                        myAvatar === key
+                          ? 'bg-violet-100 ring-2 ring-violet-500'
+                          : 'bg-gray-50 hover:bg-gray-100'
+                      }`}
+                    >
+                      <span className="text-2xl">{emoji}</span>
+                      <span className="text-xs text-gray-600 mt-1">{name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* カラー選択 */}
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-gray-700 mb-3">背景カラー</h3>
+                <div className="grid grid-cols-4 gap-2">
+                  {avatarColors.map(({ id, color, name }) => (
+                    <button
+                      key={id}
+                      onClick={() => setMyColor(color)}
+                      className={`flex flex-col items-center p-2 rounded-xl transition-all ${
+                        myColor === color
+                          ? 'ring-2 ring-violet-500 ring-offset-2'
+                          : 'hover:scale-105'
+                      }`}
+                    >
+                      <div
+                        className="w-10 h-10 rounded-full shadow-inner"
+                        style={{ backgroundColor: color }}
+                      ></div>
+                      <span className="text-xs text-gray-600 mt-1">{name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 bg-gray-50 flex gap-3">
+              <button
+                onClick={() => setShowAvatarCustomizer(false)}
+                className="flex-1 py-3 border border-gray-300 text-gray-700 font-medium rounded-xl hover:bg-gray-100 transition"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={() => {
+                  updateAvatar(myAvatar, myColor);
+                  setShowAvatarCustomizer(false);
+                }}
+                className="flex-1 py-3 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white font-medium rounded-xl hover:from-violet-600 hover:to-fuchsia-600 transition"
+              >
+                保存する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ユーザー選択メニュー */}
       {selectedUser && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-40">
@@ -450,23 +543,15 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
               <div>
                 <h3 className="text-lg font-bold text-gray-800">{selectedUser.name}</h3>
                 <p className="text-sm text-gray-500 flex items-center gap-2 mt-1">
-                  <span className={`w-2.5 h-2.5 rounded-full ${
-                    selectedUser.status === 'online' ? 'bg-green-500' :
-                    selectedUser.status === 'away' ? 'bg-yellow-500' :
-                    selectedUser.status === 'busy' ? 'bg-red-500' : 'bg-gray-400'
-                  }`}></span>
-                  {selectedUser.status === 'online' ? 'オンライン' :
-                   selectedUser.status === 'away' ? '離席中' :
-                   selectedUser.status === 'busy' ? '取り込み中' : 'オフライン'}
+                  <span className={`w-2.5 h-2.5 rounded-full ${statusInfo[selectedUser.status || 'online'].color}`}></span>
+                  {statusInfo[selectedUser.status || 'online'].label}
                 </p>
               </div>
             </div>
 
             <div className="space-y-3">
               <button
-                onClick={() => {
-                  setShowVideoCall(true);
-                }}
+                onClick={() => setShowVideoCall(true)}
                 className="w-full py-3.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-600 hover:to-indigo-700 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
               >
                 <span>📹</span>

@@ -1,7 +1,7 @@
 'use client';
 
 import { User } from '@/store/useStore';
-import { avatarTypes } from './AvatarCustomizer';
+import { avatarTypes } from '@/lib/avatars';
 
 interface AvatarProps {
   user: User;
