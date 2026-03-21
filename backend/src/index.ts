@@ -127,6 +127,9 @@ const POSITION_UPDATE_INTERVAL = 50; // 20回/秒 = 50ms
 const audioPeerUpdateTimestamps = new Map<string, number>();
 const AUDIO_PEER_UPDATE_INTERVAL = 100; // 10回/秒 = 100ms
 
+/** アクティブな1:1通話ペアを追跡（グローバル: caller -> callee） */
+const activeCallPeers = new Map<string, string>();
+
 /** イベントレートリミッター */
 const eventRateLimits = new Map<string, Map<string, { count: number; resetAt: number }>>();
 const RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
@@ -135,6 +138,8 @@ const RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
   'audio-answer': { max: 20, windowMs: 10000 },
   'audio-ice-candidate': { max: 100, windowMs: 10000 },
   'call-user': { max: 5, windowMs: 30000 },
+  'answer-call': { max: 5, windowMs: 30000 },
+  'end-call': { max: 10, windowMs: 30000 },
   'update-user': { max: 10, windowMs: 10000 },
 };
 
@@ -767,9 +772,6 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   // 1:1 ビデオ通話シグナリング（既存機能）
   // -------------------
-  /** アクティブな1:1通話ペアを追跡 */
-  const activeCallPeers = new Map<string, string>(); // caller -> callee
-
   socket.on('call-user', (data: { to: string; signal: unknown }) => {
     try {
       if (!checkRateLimit(socket.id, 'call-user')) return;
@@ -804,6 +806,7 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('answer-call', (data: { to: string; signal: unknown }) => {
     try {
+      if (!checkRateLimit(socket.id, 'answer-call')) return;
       if (typeof data?.to !== 'string' || !data.signal) return;
       if (!isValidSignalPayload(data.signal)) return;
       if (!users.has(data.to)) return;
@@ -821,6 +824,7 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('end-call', (data: { to: string }) => {
     try {
+      if (!checkRateLimit(socket.id, 'end-call')) return;
       if (typeof data?.to !== 'string') return;
       if (!users.has(data.to)) return;
       // 通話ペアの一方であることを検証
@@ -860,20 +864,22 @@ io.on('connection', (socket: Socket) => {
         userAudioPeers.delete(socket.id);
         positionUpdateTimestamps.delete(socket.id);
         audioPeerUpdateTimestamps.delete(socket.id);
-        eventRateLimits.delete(socket.id);
+      }
 
-        // アクティブな通話ペアをクリーンアップ
-        const callTarget = activeCallPeers.get(socket.id);
-        if (callTarget) {
-          activeCallPeers.delete(socket.id);
-          io.to(callTarget).emit('call-ended', { from: socket.id });
-        }
-        // 相手が自分に通話をかけていた場合もクリア
-        for (const [callerId, calleeId] of activeCallPeers.entries()) {
-          if (calleeId === socket.id) {
-            activeCallPeers.delete(callerId);
-            io.to(callerId).emit('call-ended', { from: socket.id });
-          }
+      // user有無に関係なくクリーンアップ（join前のsocketも漏れなく回収）
+      eventRateLimits.delete(socket.id);
+
+      // アクティブな通話ペアをクリーンアップ
+      const callTarget = activeCallPeers.get(socket.id);
+      if (callTarget) {
+        activeCallPeers.delete(socket.id);
+        io.to(callTarget).emit('call-ended', { from: socket.id });
+      }
+      // 相手が自分に通話をかけていた場合もクリア
+      for (const [callerId, calleeId] of activeCallPeers.entries()) {
+        if (calleeId === socket.id) {
+          activeCallPeers.delete(callerId);
+          io.to(callerId).emit('call-ended', { from: socket.id });
         }
       }
 
