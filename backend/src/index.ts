@@ -127,6 +127,40 @@ const POSITION_UPDATE_INTERVAL = 50; // 20回/秒 = 50ms
 const audioPeerUpdateTimestamps = new Map<string, number>();
 const AUDIO_PEER_UPDATE_INTERVAL = 100; // 10回/秒 = 100ms
 
+/** イベントレートリミッター */
+const eventRateLimits = new Map<string, Map<string, { count: number; resetAt: number }>>();
+const RATE_LIMITS: Record<string, { max: number; windowMs: number }> = {
+  'chat-message': { max: 10, windowMs: 10000 }, // 10メッセージ/10秒
+  'audio-offer': { max: 20, windowMs: 10000 },
+  'audio-answer': { max: 20, windowMs: 10000 },
+  'audio-ice-candidate': { max: 100, windowMs: 10000 },
+  'call-user': { max: 5, windowMs: 30000 },
+  'update-user': { max: 10, windowMs: 10000 },
+};
+
+function checkRateLimit(socketId: string, eventName: string): boolean {
+  const limit = RATE_LIMITS[eventName];
+  if (!limit) return true;
+
+  let userLimits = eventRateLimits.get(socketId);
+  if (!userLimits) {
+    userLimits = new Map();
+    eventRateLimits.set(socketId, userLimits);
+  }
+
+  const now = Date.now();
+  let entry = userLimits.get(eventName);
+
+  if (!entry || now >= entry.resetAt) {
+    entry = { count: 1, resetAt: now + limit.windowMs };
+    userLimits.set(eventName, entry);
+    return true;
+  }
+
+  entry.count++;
+  return entry.count <= limit.max;
+}
+
 // ====================
 // 初期化
 // ====================
@@ -473,6 +507,10 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   socket.on('update-user', (updates: Partial<User>) => {
     try {
+      if (!checkRateLimit(socket.id, 'update-user')) return;
+      // ペイロード検証: プレーンオブジェクトのみ許可
+      if (typeof updates !== 'object' || updates === null || Array.isArray(updates)) return;
+
       const user = users.get(socket.id);
       if (!user) return;
 
@@ -496,9 +534,18 @@ io.on('connection', (socket: Socket) => {
         const validStatuses = ['online', 'away', 'busy', 'offline'] as const;
         if (!validStatuses.includes(sanitized.status as typeof validStatuses[number])) return;
       }
-      if (sanitized.color !== undefined && typeof sanitized.color !== 'string') return;
-      if (sanitized.avatarType !== undefined && typeof sanitized.avatarType !== 'string') return;
-      if (sanitized.avatarUrl !== undefined && typeof sanitized.avatarUrl !== 'string') return;
+      if (sanitized.color !== undefined) {
+        if (typeof sanitized.color !== 'string') return;
+        sanitized.color = sanitized.color.slice(0, 20);
+      }
+      if (sanitized.avatarType !== undefined) {
+        if (typeof sanitized.avatarType !== 'string') return;
+        sanitized.avatarType = sanitized.avatarType.slice(0, 30);
+      }
+      if (sanitized.avatarUrl !== undefined) {
+        if (typeof sanitized.avatarUrl !== 'string') return;
+        sanitized.avatarUrl = sanitized.avatarUrl.slice(0, 500);
+      }
       if (sanitized.isMuted !== undefined && typeof sanitized.isMuted !== 'boolean') return;
 
       const updatedUser = { ...user, ...sanitized };
@@ -519,6 +566,7 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   socket.on('chat-message', (message: unknown) => {
     try {
+      if (!checkRateLimit(socket.id, 'chat-message')) return;
       const user = users.get(socket.id);
       if (!user) return;
 
@@ -633,10 +681,25 @@ io.on('connection', (socket: Socket) => {
     return !!peers && peers.has(toId);
   }
 
+  /** シグナリングペイロードのサイズ制限 (64KB) */
+  const MAX_SIGNAL_SIZE = 65536;
+
+  /** シグナリングペイロードが許容サイズ内か検証 */
+  function isValidSignalPayload(payload: unknown): boolean {
+    if (!payload) return false;
+    try {
+      return JSON.stringify(payload).length <= MAX_SIGNAL_SIZE;
+    } catch {
+      return false;
+    }
+  }
+
   socket.on('audio-offer', (data: { to: string; sdp: unknown }) => {
     try {
+      if (!checkRateLimit(socket.id, 'audio-offer')) return;
       if (typeof data?.to !== 'string' || !data.sdp) return;
       if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+      if (!isValidSignalPayload(data.sdp)) return;
 
       io.to(data.to).emit('audio-offer', {
         from: socket.id,
@@ -649,8 +712,10 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('audio-answer', (data: { to: string; sdp: unknown }) => {
     try {
+      if (!checkRateLimit(socket.id, 'audio-answer')) return;
       if (typeof data?.to !== 'string' || !data.sdp) return;
       if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+      if (!isValidSignalPayload(data.sdp)) return;
 
       io.to(data.to).emit('audio-answer', {
         from: socket.id,
@@ -663,8 +728,10 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('audio-ice-candidate', (data: { to: string; candidate: unknown }) => {
     try {
+      if (!checkRateLimit(socket.id, 'audio-ice-candidate')) return;
       if (typeof data?.to !== 'string' || !data.candidate) return;
       if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+      if (!isValidSignalPayload(data.candidate)) return;
 
       io.to(data.to).emit('audio-ice-candidate', {
         from: socket.id,
@@ -700,13 +767,30 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   // 1:1 ビデオ通話シグナリング（既存機能）
   // -------------------
+  /** アクティブな1:1通話ペアを追跡 */
+  const activeCallPeers = new Map<string, string>(); // caller -> callee
+
   socket.on('call-user', (data: { to: string; signal: unknown }) => {
     try {
+      if (!checkRateLimit(socket.id, 'call-user')) return;
       if (typeof data?.to !== 'string' || !data.signal) return;
+      if (!isValidSignalPayload(data.signal)) return;
       const user = users.get(socket.id);
       if (!user) return;
-      // 通話先が存在するユーザーか検証
-      if (!users.has(data.to)) return;
+      const target = users.get(data.to);
+      if (!target) return;
+
+      // 同じルーム内、またはルーム外で近距離（500px以内）のユーザーのみ通話可能
+      if (user.currentRoom && target.currentRoom) {
+        if (user.currentRoom !== target.currentRoom) return;
+      } else if (!user.currentRoom && !target.currentRoom) {
+        if (calculateDistance(user, target) > 500) return;
+      } else {
+        // 片方がルーム内、片方がルーム外 → 通話不可
+        return;
+      }
+
+      activeCallPeers.set(socket.id, data.to);
 
       io.to(data.to).emit('incoming-call', {
         from: socket.id,
@@ -721,7 +805,10 @@ io.on('connection', (socket: Socket) => {
   socket.on('answer-call', (data: { to: string; signal: unknown }) => {
     try {
       if (typeof data?.to !== 'string' || !data.signal) return;
+      if (!isValidSignalPayload(data.signal)) return;
       if (!users.has(data.to)) return;
+      // 相手が自分に通話をかけていることを検証
+      if (activeCallPeers.get(data.to) !== socket.id) return;
 
       io.to(data.to).emit('call-accepted', {
         from: socket.id,
@@ -736,6 +823,12 @@ io.on('connection', (socket: Socket) => {
     try {
       if (typeof data?.to !== 'string') return;
       if (!users.has(data.to)) return;
+      // 通話ペアの一方であることを検証
+      if (activeCallPeers.get(socket.id) !== data.to && activeCallPeers.get(data.to) !== socket.id) return;
+
+      // 通話ペアをクリア
+      activeCallPeers.delete(socket.id);
+      activeCallPeers.delete(data.to);
 
       io.to(data.to).emit('call-ended', { from: socket.id });
     } catch (error) {
@@ -767,6 +860,21 @@ io.on('connection', (socket: Socket) => {
         userAudioPeers.delete(socket.id);
         positionUpdateTimestamps.delete(socket.id);
         audioPeerUpdateTimestamps.delete(socket.id);
+        eventRateLimits.delete(socket.id);
+
+        // アクティブな通話ペアをクリーンアップ
+        const callTarget = activeCallPeers.get(socket.id);
+        if (callTarget) {
+          activeCallPeers.delete(socket.id);
+          io.to(callTarget).emit('call-ended', { from: socket.id });
+        }
+        // 相手が自分に通話をかけていた場合もクリア
+        for (const [callerId, calleeId] of activeCallPeers.entries()) {
+          if (calleeId === socket.id) {
+            activeCallPeers.delete(callerId);
+            io.to(callerId).emit('call-ended', { from: socket.id });
+          }
+        }
       }
 
       users.delete(socket.id);
