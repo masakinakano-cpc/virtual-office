@@ -1,23 +1,32 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { useStore, ChatMessage } from '@/store/useStore';
+import { useStore } from '@/store/useStore';
 import { getSocket } from '@/lib/socket';
 
 export default function ChatBox() {
   const [input, setInput] = useState('');
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const messages = useStore((state) => state.messages);
   const currentUser = useStore((state) => state.currentUser);
+  const currentRoom = useStore((state) => state.currentRoom);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevMessageCountRef = useRef(0);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (!isMinimized) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      setUnreadCount(0);
+    } else if (messages.length > prevMessageCountRef.current) {
+      setUnreadCount((c) => c + (messages.length - prevMessageCountRef.current));
+    }
+    prevMessageCountRef.current = messages.length;
+  }, [messages, isMinimized]);
 
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
-
     const socket = getSocket();
     socket.emit('chat-message', input);
     setInput('');
@@ -31,68 +40,104 @@ export default function ChatBox() {
   };
 
   return (
-    <div className="absolute bottom-4 left-4 w-80 bg-white bg-opacity-95 rounded-lg shadow-xl overflow-hidden">
-      {/* ヘッダー */}
-      <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2">
-        <h3 className="font-semibold text-sm">Near Chat</h3>
-        <p className="text-xs text-blue-100">150px以内のユーザーと会話</p>
-      </div>
-
-      {/* メッセージ一覧 */}
-      <div className="h-48 overflow-y-auto p-3 space-y-2 bg-gray-50">
-        {messages.length === 0 ? (
-          <p className="text-gray-400 text-sm text-center py-4">
-            近くのユーザーとチャットできます
-          </p>
-        ) : (
-          messages.map((msg, index) => (
-            <div
-              key={`${msg.timestamp}-${index}`}
-              className={`flex flex-col ${
-                msg.userId === currentUser?.id ? 'items-end' : 'items-start'
-              }`}
-            >
-              <div
-                className={`max-w-[80%] rounded-lg px-3 py-1.5 ${
-                  msg.userId === currentUser?.id
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-white border border-gray-200'
-                }`}
-              >
-                {msg.userId !== currentUser?.id && (
-                  <p className="text-xs font-medium text-blue-600 mb-0.5">
-                    {msg.userName}
-                  </p>
-                )}
-                <p className="text-sm break-words">{msg.message}</p>
-              </div>
-              <span className="text-[10px] text-gray-400 mt-0.5 px-1">
-                {formatTime(msg.timestamp)}
-              </span>
-            </div>
-          ))
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* 入力欄 */}
-      <form onSubmit={sendMessage} className="p-2 bg-white border-t">
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="メッセージを入力..."
-            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-          <button
-            type="submit"
-            className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            送信
-          </button>
+    <div
+      className={`absolute bottom-16 left-4 z-30 transition-all ${
+        isMinimized ? 'w-48' : 'w-80'
+      }`}
+    >
+      {/* Header */}
+      <button
+        onClick={() => setIsMinimized(!isMinimized)}
+        className="w-full flex items-center justify-between bg-slate-800 text-white px-4 py-2 rounded-t-xl hover:bg-slate-700 transition"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">
+            💬 {currentRoom ? 'ルームチャット' : 'Near Chat'}
+          </span>
+          {unreadCount > 0 && isMinimized && (
+            <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold">
+              {unreadCount}
+            </span>
+          )}
         </div>
-      </form>
+        <span className="text-xs">{isMinimized ? '▲' : '▼'}</span>
+      </button>
+
+      {!isMinimized && (
+        <>
+          {/* Scope indicator */}
+          <div className="bg-slate-100 px-3 py-1.5 text-[10px] text-slate-500 border-x border-slate-200">
+            {currentRoom ? '🏠 同じ部屋のメンバーに送信' : '📡 200px以内のユーザーに送信'}
+          </div>
+
+          {/* Messages */}
+          <div className="h-44 overflow-y-auto p-3 space-y-1.5 bg-white border-x border-slate-200">
+            {messages.length === 0 ? (
+              <p className="text-slate-400 text-xs text-center py-6">
+                メッセージはまだありません
+              </p>
+            ) : (
+              messages.map((msg, index) => {
+                if (msg.type === 'system' || msg.userId === 'system') {
+                  return (
+                    <div key={`${msg.timestamp}-${index}`} className="text-center">
+                      <span className="text-[10px] text-slate-400 bg-slate-50 px-2 py-0.5 rounded-full">
+                        {msg.message}
+                      </span>
+                    </div>
+                  );
+                }
+
+                const isMe = msg.userId === currentUser?.id;
+                return (
+                  <div
+                    key={`${msg.timestamp}-${index}`}
+                    className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-lg px-3 py-1.5 ${
+                        isMe
+                          ? 'bg-indigo-500 text-white'
+                          : 'bg-slate-100 text-slate-800'
+                      }`}
+                    >
+                      {!isMe && (
+                        <p className="text-[10px] font-semibold text-indigo-500 mb-0.5">
+                          {msg.userName}
+                        </p>
+                      )}
+                      <p className="text-sm break-words leading-snug">{msg.message}</p>
+                    </div>
+                    <span className="text-[9px] text-slate-400 mt-0.5 px-1">
+                      {formatTime(msg.timestamp)}
+                    </span>
+                  </div>
+                );
+              })
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input */}
+          <form onSubmit={sendMessage} className="bg-white border border-slate-200 rounded-b-xl p-2">
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="メッセージを入力..."
+                className="flex-1 px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 bg-indigo-500 text-white text-sm font-medium rounded-lg hover:bg-indigo-600 transition"
+              >
+                送信
+              </button>
+            </div>
+          </form>
+        </>
+      )}
     </div>
   );
 }

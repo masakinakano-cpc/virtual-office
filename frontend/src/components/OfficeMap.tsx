@@ -1,28 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useStore } from '@/store/useStore';
+import { useStore, Room } from '@/store/useStore';
 import { getSocket, connectSocket } from '@/lib/socket';
 import { avatarTypes, avatarColors } from '@/lib/avatars';
 import Avatar from './Avatar';
 import ChatBox from './ChatBox';
 import VideoCall from './VideoCall';
+import Sidebar from './Sidebar';
+import MicControls from './MicControls';
+import useProximityAudio from '@/hooks/useProximityAudio';
 import { User } from '@/store/useStore';
 
-interface Room {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  color: string;
-  type: 'meeting' | 'lounge' | 'focus' | 'open';
-}
-
-interface OfficeMapProps {
-  guestName: string;
-}
+// Map constants
+const MAP_WIDTH = 1000;
+const MAP_HEIGHT = 600;
+const MOVE_SPEED = 3; // pixels per frame for smooth movement
 
 const roomIcons: Record<string, string> = {
   meeting: '💼',
@@ -31,25 +24,46 @@ const roomIcons: Record<string, string> = {
   open: '🌐',
 };
 
-// 装飾オブジェクト
-const decorations = [
-  { type: 'plant', x: 220, y: 50, emoji: '🪴' },
-  { type: 'plant', x: 770, y: 50, emoji: '🌿' },
-  { type: 'plant', x: 220, y: 520, emoji: '🌱' },
-  { type: 'plant', x: 770, y: 520, emoji: '🪴' },
-  { type: 'coffee', x: 920, y: 380, emoji: '☕' },
-  { type: 'bookshelf', x: 20, y: 300, emoji: '📚' },
-  { type: 'water', x: 960, y: 300, emoji: '🚰' },
+const statusInfo: Record<string, { label: string; color: string; icon: string }> = {
+  online: { label: 'オンライン', color: 'bg-green-500', icon: '🟢' },
+  away: { label: '離席中', color: 'bg-yellow-500', icon: '🟡' },
+  busy: { label: '取り込み中', color: 'bg-red-500', icon: '🔴' },
+  offline: { label: 'オフライン', color: 'bg-gray-400', icon: '⚫' },
+};
+
+// Desk positions
+const desks = [
+  { x: 350, y: 240 }, { x: 450, y: 240 }, { x: 550, y: 240 }, { x: 650, y: 240 },
+  { x: 350, y: 340 }, { x: 450, y: 340 }, { x: 550, y: 340 }, { x: 650, y: 340 },
 ];
+
+// Decorations
+const decorations = [
+  { x: 270, y: 50, emoji: '🪴' },
+  { x: 730, y: 50, emoji: '🌿' },
+  { x: 270, y: 550, emoji: '🌱' },
+  { x: 730, y: 550, emoji: '🪴' },
+  { x: 500, y: 160, emoji: '🖨️' },
+  { x: 500, y: 450, emoji: '🚰' },
+];
+
+interface OfficeMapProps {
+  guestName: string;
+}
 
 export default function OfficeMap({ guestName }: OfficeMapProps) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const [rooms, setRooms] = useState<Room[]>([]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const keysRef = useRef<Set<string>>(new Set());
+  const animFrameRef = useRef<number>(0);
+  const lastMoveEmitRef = useRef<number>(0);
+
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [showVideoCall, setShowVideoCall] = useState(false);
   const [showAvatarCustomizer, setShowAvatarCustomizer] = useState(false);
+  const [mapScale, setMapScale] = useState(1);
 
-  // アバター設定
+  // Avatar config
   const [myAvatar, setMyAvatar] = useState(() => {
     const avatars = Object.keys(avatarTypes);
     return avatars[Math.floor(Math.random() * avatars.length)];
@@ -62,6 +76,11 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
   const {
     currentUser,
     users,
+    rooms,
+    currentRoom,
+    audio,
+    sidebarOpen,
+    lightweightMode,
     setCurrentUser,
     updateCurrentUser,
     setUsers,
@@ -69,47 +88,127 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
     removeUser,
     updateUserPosition,
     updateUser,
+    setRooms,
+    setCurrentRoom,
+    updateRoom,
     addMessage,
+    addSystemMessage,
+    setMuted,
+    setUserSpeaking,
+    toggleSidebar,
+    setLightweightMode,
   } = useStore();
 
-  // Socket.io接続とイベント設定
-  useEffect(() => {
-    const socket = connectSocket();
+  // Proximity audio
+  const socket = getSocket();
+  const {
+    startAudio,
+    stopAudio,
+    isAudioActive,
+    connectedPeers,
+    localStream,
+  } = useProximityAudio({
+    socket,
+    currentUser,
+    users,
+    isMuted: audio.isMuted,
+    onSpeakingChange: (userId: string, speaking: boolean) => {
+      setUserSpeaking(userId, speaking);
+    },
+    onAudioLevelChange: (level: number) => {
+      useStore.getState().setAudioLevel(level);
+    },
+  });
 
-    socket.on('user-joined', (u) => {
+  // Responsive map scaling
+  useEffect(() => {
+    const updateScale = () => {
+      if (containerRef.current) {
+        const containerWidth = containerRef.current.clientWidth - (sidebarOpen ? 280 : 0) - 32;
+        const containerHeight = containerRef.current.clientHeight - 80 - 32;
+        const scaleX = containerWidth / MAP_WIDTH;
+        const scaleY = containerHeight / MAP_HEIGHT;
+        setMapScale(Math.min(scaleX, scaleY, 1.2));
+      }
+    };
+    updateScale();
+    window.addEventListener('resize', updateScale);
+    return () => window.removeEventListener('resize', updateScale);
+  }, [sidebarOpen]);
+
+  // Socket connection and event setup
+  useEffect(() => {
+    const sock = connectSocket();
+
+    sock.on('user-joined', (u: User) => {
       setCurrentUser(u);
     });
 
-    socket.on('users-list', (usersList) => {
+    sock.on('users-list', (usersList: User[]) => {
       setUsers(usersList);
     });
 
-    socket.on('rooms-list', (roomsList) => {
+    sock.on('rooms-list', (roomsList: Room[]) => {
       setRooms(roomsList);
     });
 
-    socket.on('user-connected', (u) => {
+    sock.on('user-connected', (u: User) => {
       addUser(u);
+      addSystemMessage(`${u.name} が参加しました`);
     });
 
-    socket.on('user-disconnected', (userId) => {
+    sock.on('user-disconnected', (userId: string) => {
+      const dcUser = useStore.getState().users.get(userId);
+      if (dcUser) addSystemMessage(`${dcUser.name} が退出しました`);
       removeUser(userId);
     });
 
-    socket.on('user-moved', ({ id, x, y }) => {
+    sock.on('user-moved', ({ id, x, y }: { id: string; x: number; y: number }) => {
       updateUserPosition(id, x, y);
     });
 
-    socket.on('user-updated', ({ id, ...updates }) => {
+    sock.on('user-updated', ({ id, ...updates }: { id: string } & Partial<User>) => {
       updateUser(id, updates);
     });
 
-    socket.on('chat-message', (message) => {
-      addMessage(message);
+    sock.on('chat-message', (message: { userId: string; userName: string; message: string; timestamp: number; type?: string }) => {
+      addMessage({
+        ...message,
+        type: (message.type as 'proximity' | 'room' | 'dm' | 'system') || 'proximity',
+      });
     });
 
-    // ゲストとして参加
-    socket.emit('join', {
+    sock.on('room-entered', ({ userId, roomId }: { userId: string; roomId: string }) => {
+      const enteredUser = useStore.getState().users.get(userId);
+      const enteredRoom = useStore.getState().rooms.find(r => r.id === roomId);
+      updateUser(userId, { currentRoom: roomId });
+      if (userId === sock.id) {
+        setCurrentRoom(roomId);
+        if (enteredRoom) addSystemMessage(`${enteredRoom.name} に入室しました`);
+      } else if (enteredUser && enteredRoom) {
+        addSystemMessage(`${enteredUser.name} が ${enteredRoom.name} に入りました`);
+      }
+    });
+
+    sock.on('room-left', ({ userId, roomId }: { userId: string; roomId: string }) => {
+      const leftRoom = useStore.getState().rooms.find(r => r.id === roomId);
+      updateUser(userId, { currentRoom: null });
+      if (userId === sock.id) {
+        setCurrentRoom(null);
+        if (leftRoom) addSystemMessage(`${leftRoom.name} から退室しました`);
+      }
+    });
+
+    sock.on('room-updated', ({ roomId, occupants, locked, lockedBy }: { roomId: string; occupants: string[]; locked: boolean; lockedBy?: string }) => {
+      updateRoom(roomId, { occupants, locked, lockedBy });
+    });
+
+    sock.on('user-speaking', ({ userId, speaking }: { userId: string; speaking: boolean }) => {
+      setUserSpeaking(userId, speaking);
+    });
+
+    // Join as guest
+    sock.emit('join', {
       name: guestName,
       visibilityUserId: `guest-${Date.now()}`,
       avatarType: myAvatar,
@@ -119,447 +218,531 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
     });
 
     return () => {
-      socket.off('user-joined');
-      socket.off('users-list');
-      socket.off('rooms-list');
-      socket.off('user-connected');
-      socket.off('user-disconnected');
-      socket.off('user-moved');
-      socket.off('user-updated');
-      socket.off('chat-message');
+      sock.off('user-joined');
+      sock.off('users-list');
+      sock.off('rooms-list');
+      sock.off('user-connected');
+      sock.off('user-disconnected');
+      sock.off('user-moved');
+      sock.off('user-updated');
+      sock.off('chat-message');
+      sock.off('room-entered');
+      sock.off('room-left');
+      sock.off('room-updated');
+      sock.off('user-speaking');
     };
-  }, [guestName, myAvatar, myColor, setCurrentUser, setUsers, addUser, removeUser, updateUserPosition, updateUser, addMessage]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guestName]);
 
-  // アバター更新
-  const updateAvatar = (newAvatar: string, newColor: string) => {
-    setMyAvatar(newAvatar);
-    setMyColor(newColor);
-    const socket = getSocket();
-    socket.emit('update-user', { avatarType: newAvatar, color: newColor });
-    updateCurrentUser({ avatarType: newAvatar, color: newColor });
-  };
-
-  // ステータス変更
-  const handleStatusChange = (status: 'online' | 'away' | 'busy' | 'offline') => {
-    setMyStatus(status);
-    const socket = getSocket();
-    socket.emit('update-user', { status });
-    updateCurrentUser({ status });
-  };
-
-  // クリックで移動
-  const handleMapClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!currentUser || !mapRef.current) return;
-
-      const rect = mapRef.current.getBoundingClientRect();
-      const x = Math.max(30, Math.min(970, e.clientX - rect.left));
-      const y = Math.max(30, Math.min(570, e.clientY - rect.top));
-
-      updateCurrentUser({ x, y });
-
-      const socket = getSocket();
-      socket.emit('move', { x, y });
-    },
-    [currentUser, updateCurrentUser]
-  );
-
-  // キーボードで移動
+  // Smooth keyboard movement with animation loop
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!currentUser) return;
-      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return;
+      const key = e.key.toLowerCase();
+      if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+        e.preventDefault();
+        keysRef.current.add(key);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      keysRef.current.delete(e.key.toLowerCase());
+    };
+
+    const moveLoop = () => {
+      const state = useStore.getState();
+      const user = state.currentUser;
+      if (!user) {
+        animFrameRef.current = requestAnimationFrame(moveLoop);
         return;
       }
 
-      const speed = 20;
-      let newX = currentUser.x;
-      let newY = currentUser.y;
-
-      switch (e.key) {
-        case 'ArrowUp':
-        case 'w':
-        case 'W':
-          newY = Math.max(30, currentUser.y - speed);
-          break;
-        case 'ArrowDown':
-        case 's':
-        case 'S':
-          newY = Math.min(570, currentUser.y + speed);
-          break;
-        case 'ArrowLeft':
-        case 'a':
-        case 'A':
-          newX = Math.max(30, currentUser.x - speed);
-          break;
-        case 'ArrowRight':
-        case 'd':
-        case 'D':
-          newX = Math.min(970, currentUser.x + speed);
-          break;
-        default:
-          return;
+      const keys = keysRef.current;
+      if (keys.size === 0) {
+        animFrameRef.current = requestAnimationFrame(moveLoop);
+        return;
       }
 
-      updateCurrentUser({ x: newX, y: newY });
+      let dx = 0;
+      let dy = 0;
 
-      const socket = getSocket();
-      socket.emit('move', { x: newX, y: newY });
+      if (keys.has('w') || keys.has('arrowup')) dy -= MOVE_SPEED;
+      if (keys.has('s') || keys.has('arrowdown')) dy += MOVE_SPEED;
+      if (keys.has('a') || keys.has('arrowleft')) dx -= MOVE_SPEED;
+      if (keys.has('d') || keys.has('arrowright')) dx += MOVE_SPEED;
+
+      // Normalize diagonal movement
+      if (dx !== 0 && dy !== 0) {
+        const factor = 1 / Math.sqrt(2);
+        dx *= factor;
+        dy *= factor;
+      }
+
+      const newX = Math.max(20, Math.min(MAP_WIDTH - 20, user.x + dx));
+      const newY = Math.max(20, Math.min(MAP_HEIGHT - 20, user.y + dy));
+
+      if (newX !== user.x || newY !== user.y) {
+        state.updateCurrentUser({ x: newX, y: newY });
+
+        // Throttle socket emissions to ~20/sec
+        const now = Date.now();
+        if (now - lastMoveEmitRef.current >= 50) {
+          lastMoveEmitRef.current = now;
+          const sock = getSocket();
+          sock.emit('move', { x: Math.round(newX), y: Math.round(newY) });
+        }
+      }
+
+      animFrameRef.current = requestAnimationFrame(moveLoop);
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentUser, updateCurrentUser]);
+    window.addEventListener('keyup', handleKeyUp);
+    animFrameRef.current = requestAnimationFrame(moveLoop);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      cancelAnimationFrame(animFrameRef.current);
+    };
+  }, []);
+
+  // Click to move (smooth)
+  const handleMapClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (!currentUser || !mapRef.current) return;
+      const rect = mapRef.current.getBoundingClientRect();
+      const x = Math.max(20, Math.min(MAP_WIDTH - 20, (e.clientX - rect.left) / mapScale));
+      const y = Math.max(20, Math.min(MAP_HEIGHT - 20, (e.clientY - rect.top) / mapScale));
+
+      updateCurrentUser({ x, y });
+      const sock = getSocket();
+      sock.emit('move', { x: Math.round(x), y: Math.round(y) });
+    },
+    [currentUser, updateCurrentUser, mapScale]
+  );
+
+  // Avatar update
+  const updateAvatarConfig = (newAvatar: string, newColor: string) => {
+    setMyAvatar(newAvatar);
+    setMyColor(newColor);
+    const sock = getSocket();
+    sock.emit('update-user', { avatarType: newAvatar, color: newColor });
+    updateCurrentUser({ avatarType: newAvatar, color: newColor });
+  };
+
+  // Status change
+  const handleStatusChange = (status: 'online' | 'away' | 'busy' | 'offline') => {
+    setMyStatus(status);
+    const sock = getSocket();
+    sock.emit('update-user', { status });
+    updateCurrentUser({ status });
+  };
+
+  // Mic toggle
+  const handleToggleMute = useCallback(() => {
+    const newMuted = !audio.isMuted;
+    setMuted(newMuted);
+    if (localStream) {
+      localStream.getAudioTracks().forEach((track: MediaStreamTrack) => {
+        track.enabled = !newMuted;
+      });
+    }
+  }, [audio.isMuted, setMuted, localStream]);
+
+  // Handle start audio
+  const handleStartAudio = useCallback(async () => {
+    await startAudio();
+    setMuted(false);
+  }, [startAudio, setMuted]);
+
+  const handleLeave = () => {
+    stopAudio();
+    window.location.reload();
+  };
 
   const otherUsers = Array.from(users.values()).filter(
     (u) => u.id !== currentUser?.id
   );
 
-  const handleLeave = () => {
-    window.location.reload();
-  };
-
-  const statusInfo = {
-    online: { label: 'オンライン', color: 'bg-green-500', icon: '🟢' },
-    away: { label: '離席中', color: 'bg-yellow-500', icon: '🟡' },
-    busy: { label: '取り込み中', color: 'bg-red-500', icon: '🔴' },
-    offline: { label: 'オフライン', color: 'bg-gray-400', icon: '⚫' },
+  const handleUserClick = (user: User) => {
+    setSelectedUser(user);
   };
 
   return (
-    <div className="relative w-full h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 overflow-hidden">
-      {/* 背景装飾 */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-20 left-10 w-72 h-72 bg-purple-200 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-pulse"></div>
-        <div className="absolute top-40 right-10 w-72 h-72 bg-yellow-200 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-pulse" style={{ animationDelay: '2s' }}></div>
-        <div className="absolute bottom-20 left-1/2 w-72 h-72 bg-pink-200 rounded-full mix-blend-multiply filter blur-3xl opacity-30 animate-pulse" style={{ animationDelay: '4s' }}></div>
-      </div>
-
-      {/* ヘッダー */}
-      <div className="absolute top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-lg shadow-sm z-20 flex items-center justify-between px-6 border-b border-white/20">
-        <div className="flex items-center gap-4">
+    <div ref={containerRef} className="relative w-full h-screen bg-slate-50 overflow-hidden flex">
+      {/* Main area */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <header className="h-14 bg-white/90 backdrop-blur-md shadow-sm z-20 flex items-center justify-between px-4 border-b border-slate-200">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
-              <span className="text-xl">🏢</span>
+            <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center shadow">
+              <span className="text-base">🏢</span>
             </div>
             <div>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">Virtual Office</h1>
-              <p className="text-xs text-gray-500">みんなで一緒に働こう</p>
+              <h1 className="text-sm font-bold text-slate-800">Virtual Office</h1>
+              <p className="text-[10px] text-slate-400">{users.size}人 オンライン</p>
             </div>
-          </div>
 
-          {/* ステータスセレクター */}
-          <div className="ml-4 relative">
+            {/* Status selector */}
             <select
               value={myStatus}
               onChange={(e) => handleStatusChange(e.target.value as typeof myStatus)}
-              className="appearance-none text-sm bg-white/70 backdrop-blur border border-gray-200 rounded-xl pl-8 pr-10 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer font-medium text-gray-700"
+              className="ml-2 text-xs bg-white border border-slate-200 rounded-lg pl-6 pr-8 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer text-slate-600"
             >
               {Object.entries(statusInfo).map(([key, { label, icon }]) => (
                 <option key={key} value={key}>{icon} {label}</option>
               ))}
             </select>
-            <div className={`absolute left-2.5 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${statusInfo[myStatus].color}`}></div>
+
+            {/* Room indicator */}
+            {currentRoom && (
+              <div className="flex items-center gap-1.5 px-3 py-1 bg-indigo-50 border border-indigo-200 rounded-lg text-xs text-indigo-700">
+                <span>{roomIcons[rooms.find(r => r.id === currentRoom)?.type || 'open']}</span>
+                {rooms.find(r => r.id === currentRoom)?.name}
+              </div>
+            )}
           </div>
-        </div>
 
-        <div className="flex items-center gap-3">
-          {/* アバター変更ボタン */}
-          <button
-            onClick={() => setShowAvatarCustomizer(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white rounded-xl hover:from-violet-600 hover:to-fuchsia-600 transition-all shadow-md hover:shadow-lg text-sm font-medium"
-          >
-            <span>✨</span>
-            アバター変更
-          </button>
-
-          {/* ユーザー情報 */}
-          <div className="flex items-center gap-3 bg-white/60 backdrop-blur rounded-xl px-4 py-2 border border-white/50">
-            <div
-              className="w-10 h-10 rounded-full flex items-center justify-center text-xl shadow-md ring-2 ring-white"
-              style={{ backgroundColor: myColor }}
+          <div className="flex items-center gap-2">
+            {/* Lightweight mode toggle */}
+            <button
+              onClick={() => setLightweightMode(!lightweightMode)}
+              className={`px-3 py-1.5 text-xs rounded-lg border transition ${
+                lightweightMode
+                  ? 'bg-amber-50 border-amber-300 text-amber-700'
+                  : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+              }`}
+              title="軽量モード"
             >
-              {avatarTypes[myAvatar]?.emoji || '🐱'}
+              ⚡ {lightweightMode ? '軽量' : '通常'}
+            </button>
+
+            {/* Avatar change */}
+            <button
+              onClick={() => setShowAvatarCustomizer(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-500 text-white rounded-lg hover:bg-violet-600 transition text-xs font-medium"
+            >
+              ✨ アバター
+            </button>
+
+            {/* User info */}
+            <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-1.5">
+              <div
+                className="w-7 h-7 rounded-full flex items-center justify-center text-sm shadow-sm"
+                style={{ backgroundColor: myColor }}
+              >
+                {avatarTypes[myAvatar]?.emoji || '🐱'}
+              </div>
+              <span className="text-xs font-medium text-slate-700">{guestName}</span>
             </div>
-            <div>
-              <p className="text-sm font-semibold text-gray-800">{guestName}</p>
-              <p className="text-xs text-gray-500 flex items-center gap-1">
-                <span className={`w-2 h-2 rounded-full ${statusInfo[myStatus].color}`}></span>
-                {statusInfo[myStatus].label}
-              </p>
-            </div>
+
+            {/* Sidebar toggle */}
+            <button
+              onClick={toggleSidebar}
+              className="p-1.5 rounded-lg border border-slate-200 hover:bg-slate-100 transition text-slate-500"
+              title="メンバーリスト"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            </button>
+
+            <button
+              onClick={handleLeave}
+              className="px-3 py-1.5 text-xs text-slate-500 hover:text-white hover:bg-red-500 rounded-lg transition border border-slate-200 hover:border-red-500"
+            >
+              退出
+            </button>
           </div>
+        </header>
 
-          <button
-            onClick={handleLeave}
-            className="px-4 py-2 text-gray-600 hover:text-white hover:bg-red-500 rounded-xl transition text-sm font-medium border border-gray-200 hover:border-red-500"
-          >
-            退出
-          </button>
-        </div>
-      </div>
-
-      {/* オフィスマップ */}
-      <div className="pt-20 pb-4 px-4 h-full flex items-center justify-center">
-        <div
-          ref={mapRef}
-          onClick={handleMapClick}
-          className="relative w-[1000px] h-[600px] bg-white/70 backdrop-blur-sm rounded-3xl shadow-2xl overflow-hidden cursor-pointer border border-white/50"
-        >
-          {/* フロアパターン */}
+        {/* Map area */}
+        <div className="flex-1 flex items-center justify-center p-4 relative">
           <div
-            className="absolute inset-0"
+            ref={mapRef}
+            onClick={handleMapClick}
+            className="relative bg-white rounded-2xl shadow-xl overflow-hidden cursor-crosshair border border-slate-200"
             style={{
-              backgroundImage: `
-                radial-gradient(circle at 25px 25px, rgba(99, 102, 241, 0.03) 2px, transparent 2px),
-                linear-gradient(rgba(99, 102, 241, 0.02) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(99, 102, 241, 0.02) 1px, transparent 1px)
-              `,
-              backgroundSize: '50px 50px, 25px 25px, 25px 25px',
+              width: MAP_WIDTH,
+              height: MAP_HEIGHT,
+              transform: `scale(${mapScale})`,
+              transformOrigin: 'center center',
             }}
-          ></div>
+          >
+            {/* Floor grid */}
+            <div
+              className="absolute inset-0 pointer-events-none"
+              style={{
+                backgroundImage: `
+                  linear-gradient(rgba(0,0,0,0.03) 1px, transparent 1px),
+                  linear-gradient(90deg, rgba(0,0,0,0.03) 1px, transparent 1px)
+                `,
+                backgroundSize: '25px 25px',
+              }}
+            />
 
-          {/* 中央のワークエリア */}
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-            <div className="absolute -inset-16 bg-gradient-to-br from-slate-50 to-slate-100 rounded-3xl opacity-50"></div>
-            <div className="relative grid grid-cols-4 gap-8">
-              {[...Array(8)].map((_, i) => (
-                <div key={i} className="relative group">
-                  <div className="w-24 h-16 bg-gradient-to-br from-amber-50 to-amber-100 rounded-xl border border-amber-200/50 shadow-md flex items-center justify-center relative overflow-hidden">
-                    <div className="absolute inset-0 opacity-20" style={{
-                      backgroundImage: 'repeating-linear-gradient(90deg, transparent, transparent 10px, rgba(180, 140, 100, 0.1) 10px, rgba(180, 140, 100, 0.1) 11px)'
-                    }}></div>
-                    <div className="w-8 h-6 bg-gradient-to-b from-gray-700 to-gray-800 rounded-sm shadow-inner flex items-center justify-center">
-                      <div className="w-6 h-4 bg-gradient-to-br from-blue-400 to-blue-500 rounded-sm"></div>
-                    </div>
+            {/* Rooms */}
+            {rooms.map((room) => {
+              const isUserInThisRoom = currentRoom === room.id;
+              const occupantCount = room.occupants.length;
+              return (
+                <div
+                  key={room.id}
+                  className={`absolute rounded-xl border-2 transition-all ${
+                    isUserInThisRoom ? 'border-indigo-400 shadow-lg shadow-indigo-100' : 'border-slate-200'
+                  } ${room.locked ? 'opacity-90' : ''}`}
+                  style={{
+                    left: room.x,
+                    top: room.y,
+                    width: room.width,
+                    height: room.height,
+                    backgroundColor: room.color,
+                  }}
+                >
+                  {/* Room interior */}
+                  <div className="absolute inset-2 rounded-lg border border-white/40" />
+
+                  {/* Room label */}
+                  <div className="absolute top-2 left-3 flex items-center gap-1.5">
+                    <span className="text-lg">{roomIcons[room.type]}</span>
+                    <span className="text-xs font-semibold text-slate-700">{room.name}</span>
+                    {room.locked && <span className="text-xs">🔒</span>}
                   </div>
-                  <div className="absolute -bottom-3 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-gradient-to-b from-gray-600 to-gray-700 rounded-full shadow-md border-2 border-gray-500"></div>
-                  <div className="absolute -top-2 -right-2 w-5 h-5 bg-white rounded-full shadow text-xs flex items-center justify-center text-gray-500 font-medium">
-                    {i + 1}
+
+                  {/* Occupant count */}
+                  {occupantCount > 0 && (
+                    <div className="absolute bottom-2 right-3 flex items-center gap-1 bg-white/80 px-2 py-0.5 rounded-full">
+                      <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                      <span className="text-[10px] text-slate-600 font-medium">{occupantCount}人</span>
+                    </div>
+                  )}
+
+                  {/* Lounge decoration */}
+                  {room.type === 'lounge' && (
+                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-4">
+                      <div className="w-10 h-5 bg-rose-300/60 rounded-lg" />
+                      <div className="w-10 h-5 bg-rose-300/60 rounded-lg" />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Desks */}
+            {desks.map((desk, i) => (
+              <div key={`desk-${i}`} className="absolute" style={{ left: desk.x - 40, top: desk.y - 25 }}>
+                <div className="w-20 h-14 bg-amber-50 rounded-lg border border-amber-200/60 shadow-sm flex items-center justify-center">
+                  <div className="w-7 h-5 bg-slate-700 rounded-sm">
+                    <div className="w-5 h-3 bg-blue-400 rounded-sm m-0.5" />
                   </div>
                 </div>
-              ))}
-            </div>
+                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-7 h-7 bg-slate-500 rounded-full border border-slate-400 shadow-sm" />
+                <div className="absolute -top-1 -right-1 w-4 h-4 bg-white rounded-full shadow text-[8px] flex items-center justify-center text-slate-400 font-medium">
+                  {i + 1}
+                </div>
+              </div>
+            ))}
+
+            {/* Decorations */}
+            {decorations.map((deco, i) => (
+              <div
+                key={`deco-${i}`}
+                className="absolute text-xl pointer-events-none"
+                style={{ left: deco.x, top: deco.y }}
+              >
+                {deco.emoji}
+              </div>
+            ))}
+
+            {/* Other users */}
+            {otherUsers.map((user) => (
+              <div
+                key={user.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedUser(user);
+                }}
+              >
+                <Avatar
+                  user={user}
+                  isSpeaking={audio.speakingUsers.has(user.id)}
+                  lightweightMode={lightweightMode}
+                />
+              </div>
+            ))}
+
+            {/* Current user avatar */}
+            {currentUser && (
+              <Avatar
+                user={currentUser}
+                isCurrentUser
+                isSpeaking={audio.isSpeaking}
+                lightweightMode={lightweightMode}
+              />
+            )}
+
+            {/* Proximity range indicator (subtle circle around current user) */}
+            {currentUser && !lightweightMode && (
+              <div
+                className="absolute rounded-full border border-dashed border-slate-200 pointer-events-none"
+                style={{
+                  left: currentUser.x - 150,
+                  top: currentUser.y - 150,
+                  width: 300,
+                  height: 300,
+                  transition: 'left 0.15s ease-out, top 0.15s ease-out',
+                  opacity: 0.4,
+                }}
+              />
+            )}
           </div>
 
-          {/* ルーム */}
-          {rooms.map((room) => (
-            <div
-              key={room.id}
-              className="absolute rounded-2xl border-2 flex flex-col items-center justify-center transition-all hover:shadow-xl hover:scale-[1.02] group"
-              style={{
-                left: room.x,
-                top: room.y,
-                width: room.width,
-                height: room.height,
-                backgroundColor: room.color,
-                borderColor: 'rgba(255,255,255,0.8)',
-              }}
-            >
-              <div className="absolute inset-2 rounded-xl border border-white/30"></div>
-              <div className="relative z-10 text-center">
-                <span className="text-3xl mb-2 block group-hover:scale-110 transition-transform">{roomIcons[room.type]}</span>
-                <span className="text-sm font-semibold text-gray-700">{room.name}</span>
-              </div>
-              {room.type === 'lounge' && (
-                <>
-                  <div className="absolute bottom-3 left-3 w-12 h-6 bg-rose-300 rounded-lg shadow-inner"></div>
-                  <div className="absolute bottom-3 right-3 w-12 h-6 bg-rose-300 rounded-lg shadow-inner"></div>
-                </>
-              )}
-            </div>
-          ))}
-
-          {/* 装飾 */}
-          {decorations.map((deco, i) => (
-            <div
-              key={i}
-              className="absolute text-2xl transition-transform hover:scale-125"
-              style={{ left: deco.x, top: deco.y }}
-            >
-              {deco.emoji}
-            </div>
-          ))}
-
-          {/* 他のユーザー */}
-          {otherUsers.map((user) => (
-            <div
-              key={user.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedUser(user);
-              }}
-            >
-              <Avatar user={user} />
-            </div>
-          ))}
-
-          {/* 自分のアバター */}
-          {currentUser && <Avatar user={currentUser} isCurrentUser />}
+          {/* Controls hint */}
+          <div className="absolute bottom-4 left-4 bg-white/90 backdrop-blur-sm rounded-xl shadow-md px-4 py-3 border border-slate-200">
+            <ul className="text-[11px] text-slate-500 space-y-1">
+              <li>🖱️ クリックで移動</li>
+              <li>⌨️ WASD / 矢印キー</li>
+              <li>💬 近接チャット (200px)</li>
+            </ul>
+          </div>
         </div>
       </div>
 
-      {/* チャットボックス */}
+      {/* Sidebar */}
+      <Sidebar
+        users={users}
+        currentUser={currentUser}
+        rooms={rooms}
+        speakingUsers={audio.speakingUsers}
+        isOpen={sidebarOpen}
+        onToggle={toggleSidebar}
+        onUserClick={handleUserClick}
+      />
+
+      {/* Chat */}
       <ChatBox />
 
-      {/* 操作説明 */}
-      <div className="absolute bottom-4 right-4 bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg px-5 py-4 border border-white/50">
-        <h3 className="font-bold text-sm text-gray-800 mb-3 flex items-center gap-2">
-          <span className="w-6 h-6 bg-gradient-to-br from-indigo-500 to-purple-500 rounded-lg flex items-center justify-center text-white text-xs">?</span>
-          操作方法
-        </h3>
-        <ul className="text-xs text-gray-600 space-y-2">
-          <li className="flex items-center gap-2">
-            <span className="w-5 h-5 bg-gray-100 rounded flex items-center justify-center">🖱️</span>
-            クリックで移動
-          </li>
-          <li className="flex items-center gap-2">
-            <span className="w-5 h-5 bg-gray-100 rounded flex items-center justify-center text-[10px]">⌨️</span>
-            WASD / 矢印キーで移動
-          </li>
-          <li className="flex items-center gap-2">
-            <span className="w-5 h-5 bg-gray-100 rounded flex items-center justify-center">💬</span>
-            近くのユーザーとチャット
-          </li>
-        </ul>
-      </div>
+      {/* Mic Controls */}
+      <MicControls
+        isMuted={audio.isMuted}
+        isAudioActive={isAudioActive}
+        audioLevel={audio.audioLevel}
+        connectedPeers={connectedPeers.size}
+        onToggleMute={handleToggleMute}
+        onStartAudio={handleStartAudio}
+      />
 
-      {/* オンラインユーザー数 */}
-      <div className="absolute top-20 left-4 bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg px-4 py-3 mt-2 border border-white/50">
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-            <div className="absolute inset-0 w-3 h-3 bg-green-500 rounded-full animate-ping opacity-75"></div>
-          </div>
-          <div>
-            <p className="text-sm font-semibold text-gray-800">{users.size}人</p>
-            <p className="text-xs text-gray-500">オンライン</p>
-          </div>
-        </div>
-      </div>
-
-      {/* アバターカスタマイザー */}
+      {/* Avatar Customizer Modal */}
       {showAvatarCustomizer && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div className="bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white px-6 py-4">
-              <h2 className="text-xl font-bold">アバターをカスタマイズ</h2>
-              <p className="text-violet-100 text-sm">キャラクターと色を選んでね</p>
+              <h2 className="text-lg font-bold">アバターをカスタマイズ</h2>
             </div>
 
             <div className="p-6">
-              {/* プレビュー */}
+              {/* Preview */}
               <div className="flex justify-center mb-6">
                 <div
-                  className="w-24 h-24 rounded-full flex items-center justify-center text-5xl shadow-lg ring-4 ring-white"
+                  className="w-20 h-20 rounded-full flex items-center justify-center text-4xl shadow-lg ring-4 ring-white"
                   style={{ backgroundColor: myColor }}
                 >
                   {avatarTypes[myAvatar]?.emoji || '🐱'}
                 </div>
               </div>
 
-              {/* キャラクター選択 */}
-              <div className="mb-6">
-                <h3 className="text-sm font-semibold text-gray-700 mb-3">キャラクター</h3>
-                <div className="grid grid-cols-4 gap-2">
+              {/* Character selection */}
+              <div className="mb-4">
+                <h3 className="text-xs font-semibold text-slate-600 mb-2">キャラクター</h3>
+                <div className="grid grid-cols-6 gap-1.5">
                   {Object.entries(avatarTypes).map(([key, { emoji, name }]) => (
                     <button
                       key={key}
                       onClick={() => setMyAvatar(key)}
-                      className={`flex flex-col items-center p-2 rounded-xl transition-all ${
-                        myAvatar === key
-                          ? 'bg-violet-100 ring-2 ring-violet-500'
-                          : 'bg-gray-50 hover:bg-gray-100'
+                      className={`flex flex-col items-center p-1.5 rounded-lg transition ${
+                        myAvatar === key ? 'bg-violet-100 ring-2 ring-violet-500' : 'hover:bg-slate-50'
                       }`}
                     >
-                      <span className="text-2xl">{emoji}</span>
-                      <span className="text-xs text-gray-600 mt-1">{name}</span>
+                      <span className="text-xl">{emoji}</span>
+                      <span className="text-[9px] text-slate-500">{name}</span>
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* カラー選択 */}
-              <div className="mb-6">
-                <h3 className="text-sm font-semibold text-gray-700 mb-3">背景カラー</h3>
-                <div className="grid grid-cols-4 gap-2">
-                  {avatarColors.map(({ id, color, name }) => (
+              {/* Color selection */}
+              <div className="mb-4">
+                <h3 className="text-xs font-semibold text-slate-600 mb-2">カラー</h3>
+                <div className="flex gap-2 flex-wrap">
+                  {avatarColors.map(({ id, color }) => (
                     <button
                       key={id}
                       onClick={() => setMyColor(color)}
-                      className={`flex flex-col items-center p-2 rounded-xl transition-all ${
-                        myColor === color
-                          ? 'ring-2 ring-violet-500 ring-offset-2'
-                          : 'hover:scale-105'
+                      className={`w-8 h-8 rounded-full transition ${
+                        myColor === color ? 'ring-2 ring-violet-500 ring-offset-2 scale-110' : 'hover:scale-110'
                       }`}
-                    >
-                      <div
-                        className="w-10 h-10 rounded-full shadow-inner"
-                        style={{ backgroundColor: color }}
-                      ></div>
-                      <span className="text-xs text-gray-600 mt-1">{name}</span>
-                    </button>
+                      style={{ backgroundColor: color }}
+                    />
                   ))}
                 </div>
               </div>
             </div>
 
-            <div className="px-6 py-4 bg-gray-50 flex gap-3">
+            <div className="px-6 py-3 bg-slate-50 flex gap-2">
               <button
                 onClick={() => setShowAvatarCustomizer(false)}
-                className="flex-1 py-3 border border-gray-300 text-gray-700 font-medium rounded-xl hover:bg-gray-100 transition"
+                className="flex-1 py-2.5 border border-slate-300 text-slate-600 rounded-lg hover:bg-slate-100 transition text-sm"
               >
                 キャンセル
               </button>
               <button
                 onClick={() => {
-                  updateAvatar(myAvatar, myColor);
+                  updateAvatarConfig(myAvatar, myColor);
                   setShowAvatarCustomizer(false);
                 }}
-                className="flex-1 py-3 bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white font-medium rounded-xl hover:from-violet-600 hover:to-fuchsia-600 transition"
+                className="flex-1 py-2.5 bg-violet-500 text-white rounded-lg hover:bg-violet-600 transition text-sm font-medium"
               >
-                保存する
+                保存
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ユーザー選択メニュー */}
-      {selectedUser && (
-        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-40">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full mx-4 shadow-2xl border border-white/50">
-            <div className="flex items-center gap-4 mb-6">
+      {/* User selection menu */}
+      {selectedUser && !showVideoCall && (
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-40">
+          <div className="bg-white rounded-2xl p-5 max-w-xs w-full mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
               <div
-                className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl overflow-hidden shadow-lg"
+                className="w-12 h-12 rounded-xl flex items-center justify-center text-2xl shadow"
                 style={{ backgroundColor: selectedUser.color }}
               >
-                {selectedUser.avatarType === 'custom' && selectedUser.avatarUrl ? (
-                  <img src={selectedUser.avatarUrl} alt={selectedUser.name} className="w-full h-full object-cover" />
-                ) : (
-                  avatarTypes[selectedUser.avatarType as keyof typeof avatarTypes]?.emoji || '🐱'
-                )}
+                {avatarTypes[selectedUser.avatarType as keyof typeof avatarTypes]?.emoji || '🐱'}
               </div>
               <div>
-                <h3 className="text-lg font-bold text-gray-800">{selectedUser.name}</h3>
-                <p className="text-sm text-gray-500 flex items-center gap-2 mt-1">
-                  <span className={`w-2.5 h-2.5 rounded-full ${statusInfo[selectedUser.status || 'online'].color}`}></span>
+                <h3 className="text-base font-bold text-slate-800">{selectedUser.name}</h3>
+                <p className="text-xs text-slate-400 flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${statusInfo[selectedUser.status || 'online'].color}`} />
                   {statusInfo[selectedUser.status || 'online'].label}
                 </p>
               </div>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-2">
               <button
                 onClick={() => setShowVideoCall(true)}
-                className="w-full py-3.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white rounded-xl font-medium hover:from-blue-600 hover:to-indigo-700 transition-all shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                className="w-full py-2.5 bg-blue-500 text-white rounded-xl text-sm font-medium hover:bg-blue-600 transition flex items-center justify-center gap-2"
               >
-                <span>📹</span>
-                ビデオ通話を開始
+                📹 ビデオ通話
               </button>
               <button
                 onClick={() => setSelectedUser(null)}
-                className="w-full py-3 border-2 border-gray-200 text-gray-700 rounded-xl font-medium hover:bg-gray-50 transition"
+                className="w-full py-2 border border-slate-200 text-slate-600 rounded-xl text-sm hover:bg-slate-50 transition"
               >
                 閉じる
               </button>
@@ -568,7 +751,7 @@ export default function OfficeMap({ guestName }: OfficeMapProps) {
         </div>
       )}
 
-      {/* ビデオ通話 */}
+      {/* Video call */}
       {showVideoCall && (
         <VideoCall
           targetUser={selectedUser}
