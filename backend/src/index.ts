@@ -351,16 +351,28 @@ io.on('connection', (socket: Socket) => {
       // 後方互換性: 文字列の場合は名前として扱う
       const joinData: JoinData = typeof data === 'string' ? { name: data } : data;
 
+      // 入力値検証
+      if (typeof joinData !== 'object' || joinData === null) return;
+
+      const name = typeof joinData.name === 'string'
+        ? joinData.name.slice(0, 50).trim()
+        : '';
+
+      const validStatuses = ['online', 'away', 'busy', 'offline'] as const;
+      const status = (typeof joinData.status === 'string' && validStatuses.includes(joinData.status as typeof validStatuses[number]))
+        ? joinData.status
+        : 'online';
+
       const user: User = {
         id: socket.id,
-        visibilityUserId: joinData.visibilityUserId,
-        name: joinData.name || `Guest_${socket.id.slice(0, 4)}`,
+        visibilityUserId: typeof joinData.visibilityUserId === 'string' ? joinData.visibilityUserId.slice(0, 100) : undefined,
+        name: name || `Guest_${socket.id.slice(0, 4)}`,
         x: 400 + Math.random() * 200,
         y: 300 + Math.random() * 200,
-        color: joinData.color || getRandomColor(),
-        avatarType: joinData.avatarType || getRandomAvatarType(),
-        avatarUrl: joinData.avatarUrl || '',
-        status: joinData.status || 'online',
+        color: typeof joinData.color === 'string' ? joinData.color.slice(0, 20) : getRandomColor(),
+        avatarType: typeof joinData.avatarType === 'string' ? joinData.avatarType.slice(0, 30) : getRandomAvatarType(),
+        avatarUrl: typeof joinData.avatarUrl === 'string' ? joinData.avatarUrl.slice(0, 500) : '',
+        status,
         currentRoom: null,
         isMuted: false,
       };
@@ -404,19 +416,31 @@ io.on('connection', (socket: Socket) => {
 
       const oldRoomId = user.currentRoom;
 
-      // 位置を更新
-      user.x = position.x;
-      user.y = position.y;
+      // 入力値検証: 座標は有限数のみ許可し、マップ範囲内にクランプ
+      const newX = Number(position.x);
+      const newY = Number(position.y);
+      if (!Number.isFinite(newX) || !Number.isFinite(newY)) return;
+      user.x = Math.max(0, Math.min(2000, newX));
+      user.y = Math.max(0, Math.min(2000, newY));
 
       // 新しいルームを検出
       const newRoomId = detectUserRoom(user);
-      user.currentRoom = newRoomId;
-      users.set(socket.id, user);
 
-      // ルーム遷移を処理
+      // ルーム遷移を処理（ロック判定を含むため、currentRoom更新前に実行）
       if (oldRoomId !== newRoomId) {
-        handleRoomTransition(socket, user, oldRoomId, newRoomId);
+        // ロックされたルームへの侵入を阻止: handleRoomTransition内でreturnされた場合、
+        // currentRoomは旧ルームのまま維持する
+        const newRoom = newRoomId ? rooms.get(newRoomId) : null;
+        if (newRoom && newRoom.locked && newRoom.type === 'meeting') {
+          // ロック済みルームには入れない → currentRoomは変更しない
+          user.currentRoom = oldRoomId;
+        } else {
+          user.currentRoom = newRoomId;
+          handleRoomTransition(socket, user, oldRoomId, newRoomId);
+        }
       }
+
+      users.set(socket.id, user);
 
       // 位置更新を全ユーザーにブロードキャスト
       socket.broadcast.emit('user-moved', {
@@ -452,13 +476,38 @@ io.on('connection', (socket: Socket) => {
       const user = users.get(socket.id);
       if (!user) return;
 
-      const updatedUser = { ...user, ...updates };
+      // ホワイトリスト方式: クライアントが変更可能なフィールドのみ許可
+      const allowedFields: (keyof User)[] = ['name', 'color', 'avatarType', 'avatarUrl', 'status', 'isMuted'];
+      const sanitized: Partial<User> = {};
+
+      for (const key of allowedFields) {
+        if (key in updates) {
+          (sanitized as Record<string, unknown>)[key] = updates[key];
+        }
+      }
+
+      // フィールド単位のバリデーション
+      if (sanitized.name !== undefined) {
+        if (typeof sanitized.name !== 'string') return;
+        sanitized.name = sanitized.name.slice(0, 50).trim();
+        if (sanitized.name.length === 0) return;
+      }
+      if (sanitized.status !== undefined) {
+        const validStatuses = ['online', 'away', 'busy', 'offline'] as const;
+        if (!validStatuses.includes(sanitized.status as typeof validStatuses[number])) return;
+      }
+      if (sanitized.color !== undefined && typeof sanitized.color !== 'string') return;
+      if (sanitized.avatarType !== undefined && typeof sanitized.avatarType !== 'string') return;
+      if (sanitized.avatarUrl !== undefined && typeof sanitized.avatarUrl !== 'string') return;
+      if (sanitized.isMuted !== undefined && typeof sanitized.isMuted !== 'boolean') return;
+
+      const updatedUser = { ...user, ...sanitized };
       users.set(socket.id, updatedUser);
 
-      // 他のユーザーに更新を通知
+      // 他のユーザーに更新を通知（サニタイズ済みフィールドのみ）
       socket.broadcast.emit('user-updated', {
         id: socket.id,
-        ...updates,
+        ...sanitized,
       });
     } catch (error) {
       console.error('❌ Error in update-user event:', error);
@@ -468,17 +517,22 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   // チャットメッセージ
   // -------------------
-  socket.on('chat-message', (message: string) => {
+  socket.on('chat-message', (message: unknown) => {
     try {
       const user = users.get(socket.id);
       if (!user) return;
+
+      // 入力値検証
+      if (typeof message !== 'string') return;
+      const sanitizedMessage = message.slice(0, 1000).trim();
+      if (sanitizedMessage.length === 0) return;
 
       const recipients = getChatRecipients(user);
 
       const chatData = {
         userId: socket.id,
         userName: user.name,
-        message,
+        message: sanitizedMessage,
         timestamp: Date.now(),
         type: user.currentRoom ? 'room' : 'proximity',
       };
@@ -502,6 +556,7 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   socket.on('lock-room', (data: { roomId: string }) => {
     try {
+      if (typeof data?.roomId !== 'string') return;
       const user = users.get(socket.id);
       const room = rooms.get(data.roomId);
 
@@ -539,6 +594,7 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('unlock-room', (data: { roomId: string }) => {
     try {
+      if (typeof data?.roomId !== 'string') return;
       const user = users.get(socket.id);
       const room = rooms.get(data.roomId);
 
@@ -568,10 +624,20 @@ io.on('connection', (socket: Socket) => {
   });
 
   // -------------------
-  // WebRTC Audio シグナリング
+  // WebRTC Audio シグナリング（ピア認可チェック付き）
   // -------------------
+
+  /** シグナリング対象が正当なオーディオピアか検証 */
+  function isAuthorizedAudioPeer(fromId: string, toId: string): boolean {
+    const peers = userAudioPeers.get(fromId);
+    return !!peers && peers.has(toId);
+  }
+
   socket.on('audio-offer', (data: { to: string; sdp: unknown }) => {
     try {
+      if (typeof data?.to !== 'string' || !data.sdp) return;
+      if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+
       io.to(data.to).emit('audio-offer', {
         from: socket.id,
         sdp: data.sdp,
@@ -583,6 +649,9 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('audio-answer', (data: { to: string; sdp: unknown }) => {
     try {
+      if (typeof data?.to !== 'string' || !data.sdp) return;
+      if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+
       io.to(data.to).emit('audio-answer', {
         from: socket.id,
         sdp: data.sdp,
@@ -594,6 +663,9 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('audio-ice-candidate', (data: { to: string; candidate: unknown }) => {
     try {
+      if (typeof data?.to !== 'string' || !data.candidate) return;
+      if (!isAuthorizedAudioPeer(socket.id, data.to)) return;
+
       io.to(data.to).emit('audio-ice-candidate', {
         from: socket.id,
         candidate: data.candidate,
@@ -608,6 +680,7 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   socket.on('user-speaking', (data: { speaking: boolean }) => {
     try {
+      if (typeof data?.speaking !== 'boolean') return;
       const user = users.get(socket.id);
       if (!user) return;
 
@@ -629,8 +702,11 @@ io.on('connection', (socket: Socket) => {
   // -------------------
   socket.on('call-user', (data: { to: string; signal: unknown }) => {
     try {
+      if (typeof data?.to !== 'string' || !data.signal) return;
       const user = users.get(socket.id);
       if (!user) return;
+      // 通話先が存在するユーザーか検証
+      if (!users.has(data.to)) return;
 
       io.to(data.to).emit('incoming-call', {
         from: socket.id,
@@ -644,6 +720,9 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('answer-call', (data: { to: string; signal: unknown }) => {
     try {
+      if (typeof data?.to !== 'string' || !data.signal) return;
+      if (!users.has(data.to)) return;
+
       io.to(data.to).emit('call-accepted', {
         from: socket.id,
         signal: data.signal,
@@ -655,6 +734,9 @@ io.on('connection', (socket: Socket) => {
 
   socket.on('end-call', (data: { to: string }) => {
     try {
+      if (typeof data?.to !== 'string') return;
+      if (!users.has(data.to)) return;
+
       io.to(data.to).emit('call-ended', { from: socket.id });
     } catch (error) {
       console.error('❌ Error in end-call event:', error);
